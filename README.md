@@ -1,49 +1,67 @@
 # .NET Clean Architecture & UML Viewer
 
-A fast, interactive architecture radar and dependency visualizer for .NET projects, designed for **WSL**, **`codegraph`**, and modern web browsers.
+A fast, interactive architecture radar, code-coverage quality engine, and autonomous AI refactoring workbench for .NET projects. Designed for **WSL**, **`codegraph`**, and modern web browsers.
 
-Eliminates the Java 21 / Quil / Processing / Swing / tmux dependencies of the original prototype, replacing them with a local REST backend and an interactive SVG/HTML5 web UI.
+Eliminates the Java 21 / Quil / Processing / Swing / tmux dependencies of the original prototype, replacing them with a local REST backend, headless AI daemon, and an interactive SVG/HTML5 web UI.
+
+---
+
+## 🚀 Global CLI: `uml`
+
+Run UML Viewer from **any project folder** with a single command:
+
+```bash
+# Navigate to your .NET solution or project
+cd ~/projects/organizations
+
+# Start UML Viewer daemon in the background (auto-detects project & namespace)
+uml start
+
+# Open dashboard directly in your browser
+uml open
+
+# Check status and running PID
+uml status
+
+# View or follow live logs
+uml logs -f
+
+# Stop the server daemon
+uml stop
+```
+
+### CLI Command Reference
+
+| Command | Description |
+|---|---|
+| `uml start [path] [prefix] [--port 5050]` | Starts background server & headless AI daemon. Auto-detects namespace prefix and builds CodeGraph index if missing. |
+| `uml stop` | Gracefully shuts down the background daemon. |
+| `uml status` | Displays daemon state, watched project, PID, and URL. |
+| `uml restart [path]` | Restarts the background daemon for the current or specified path. |
+| `uml open` | Launches default browser directly to the dashboard (`http://localhost:5050`). |
+| `uml logs [-f] [-n LINES]` | Views or follows live server logs. |
+| `uml index [path]` | Builds or rebuilds the project's CodeGraph index. |
 
 ---
 
 ## Features
 
-- **Blazing Fast**: Extracts classes, interfaces, records, methods, and relationships from `.codegraph/codegraph.db` (SQLite) in **<15ms**.
-- **Just My Code**: Automatically filters out framework noise (`System.*`, `Microsoft.Extensions.*`) and collapses external NuGet references into summary badges.
-- **Clean Architecture Policy Enforcement**: Enforces dependency rules across layers (`Domain`, `Contracts`, `Application`, `Infrastructure`, `Api`, `Client`). Flags inner $\rightarrow$ outer dependency violations with glowing **hot-red arrows**.
-- **Interactive Web UI**:
-  - Smooth 60fps pan and zoom (drag + mouse wheel).
-  - Filter toggle (`All Edges` vs `⚡ Violations Only`) to declutter large codebases.
-  - Interactive class cards with stereotypes (`<<interface>>`, `<<abstract>>`, `<<record>>`) and member count.
-  - Side inspector with member listing and **"Open in VS Code"** links (`vscode://file/...`) jumping straight to the exact line in WSL/Windows.
-- **Zero Alien Dependencies**: Runs natively on Python 3 (guaranteed present in WSL) or .NET without needing Java, Clojure, X11, or tmux.
+- **Global CLI Daemon**: Run `uml start` and `uml stop` anywhere without manual path configuration.
+- **Autonomous Headless AI Agent**: Continuously watches `.uml-viewer/tasks.json` and evaluates What-If architecture proposals, DIP decoupling suggestions, and architectural rationales in the background.
+- **Interactive What-If Simulation**: Preview architectural decoupling proposals (`📐 Arch Mode`) live on canvas before touching source code.
+- **Code Coverage & Quality Radar**: Integrates Coverlet/Cobertura XML coverage with Cyclomatic Complexity to compute **CRAP** (Change Risk Analysis and Predictions) risk pills for every class and method.
+- **Clean Architecture Policy Enforcement**: Flags Dependency Rule violations, Circular Dependencies (ADP), and Framework Taint.
+- **Deep Inspector**:
+  - Focuses selected classes with geometric auto-centering.
+  - Interactive Clean Architecture violation cards with `🤖 Fix with AI`, `💡 Explain with AI`, and `✎ Open in VS Code`.
+- **VS Code Deep-Linking**: One-click jump to file and line in VS Code inside WSL.
 
 ---
 
-## Quick Start
+## Architecture Endpoints
 
-### 1. Run the Viewer
-From the `/home/vt/exp/dotnet-uml-viewer` directory, start the server pointing to any .NET project with `.codegraph`:
-
-```bash
-python3 server.py /path/to/your/project MyProject
-```
-
-Then open your browser to:
-👉 **[http://localhost:5050](http://localhost:5050)**
-
-### 2. Command Line Arguments
-```bash
-python3 server.py <project-path> [namespace-prefix] [policy-file-path]
-```
-- `<project-path>`: Path to project root containing `.codegraph/codegraph.db`.
-- `[namespace-prefix]`: Optional root namespace prefix (e.g. `ACME`).
-- `[policy-file-path]`: Optional path to a custom `policy.json` (defaults to standard Clean Architecture layers).
-
----
-
-## REST Endpoints
-
-- `GET /api/graph`: Complete architecture graph with layers, types, edges, violations, and external package summaries.
-- `GET /api/violations`: List of detected Clean Architecture violations with line numbers and rationale.
-- `GET /api/file?path=...`: Raw file contents for in-browser inspection.
+- `GET /api/graph[?proposal_id=...]`: Complete graph with layers, classes, members, edges, CRAP scores, and violations.
+- `GET /api/events`: Server-Sent Events (SSE) live-stream pushing graph reloads, proposal updates, and agent status.
+- `GET /api/agent/tasks` & `POST /api/agent/tasks`: Queue and retrieve background AI agent tasks.
+- `GET /api/agent/proposals`: Retrieve stored What-If simulation proposals.
+- `POST /api/open`: Launches local VS Code to file path and line.

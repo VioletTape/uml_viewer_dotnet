@@ -3,6 +3,7 @@ server.py - Local HTTP server for .NET Architecture & UML Viewer.
 Serves the web dashboard, REST API, and provides instant live-reload via Server-Sent Events (SSE).
 """
 
+import argparse
 import datetime
 import glob
 import http.server
@@ -10,6 +11,7 @@ import json
 import os
 import queue
 import shutil
+import signal
 import socketserver
 import subprocess
 import sys
@@ -535,10 +537,63 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
 
 
+def auto_detect_prefix(project_path: str) -> str:
+    """Attempts to auto-detect root namespace prefix for a .NET project."""
+    project_path = os.path.abspath(project_path)
+    if not os.path.isdir(project_path):
+        return ""
+
+    # 1. Scan for .csproj files
+    csproj_names = []
+    for root, dirs, files in os.walk(project_path):
+        dirs[:] = [d for d in dirs if d not in ("bin", "obj", ".git", "node_modules", ".vs", "TestResults")]
+        for f in files:
+            if f.endswith(".csproj") and not ("Test" in f or "test" in f):
+                csproj_names.append(os.path.splitext(f)[0])
+
+    if csproj_names:
+        parts_list = [name.split(".") for name in csproj_names]
+        if len(parts_list) == 1:
+            return parts_list[0][0]
+        common_parts = []
+        for i, part in enumerate(parts_list[0]):
+            if all(len(p) > i and p[i] == part for p in parts_list):
+                common_parts.append(part)
+            else:
+                break
+        if common_parts:
+            return ".".join(common_parts)
+
+    # 2. Scan for .sln
+    sln_files = [f for f in os.listdir(project_path) if f.endswith(".sln")]
+    if sln_files:
+        return os.path.splitext(sln_files[0])[0]
+
+    # 3. Check SQLite db if exists
+    db_path = os.path.join(project_path, ".codegraph", "codegraph.db")
+    if os.path.isfile(db_path):
+        try:
+            import sqlite3
+            from collections import Counter
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT namespace FROM symbols WHERE kind='class' AND namespace != '' LIMIT 100")
+            rows = [r[0] for r in cur.fetchall() if r[0]]
+            conn.close()
+            if rows:
+                top_levels = [r.split(".")[0] for r in rows if not r.startswith("System") and not r.startswith("Microsoft")]
+                if top_levels:
+                    return Counter(top_levels).most_common(1)[0][0]
+        except Exception:
+            pass
+
+    return ""
+
+
 def run_server(project_path: str, prefix: str = "", policy_path: str = "", port: int = DEFAULT_PORT):
     global server_stopping
     ArchitectureHandler.project_path = os.path.abspath(project_path)
-    ArchitectureHandler.prefix = prefix
+    ArchitectureHandler.prefix = prefix or auto_detect_prefix(project_path)
     ArchitectureHandler.policy_path = os.path.abspath(policy_path) if policy_path else ""
 
     # Start file-watcher daemon thread
@@ -560,24 +615,45 @@ def run_server(project_path: str, prefix: str = "", policy_path: str = "", port:
     print(f" .NET Clean Architecture & UML Viewer")
     print(f"=======================================================")
     print(f" Project:   {ArchitectureHandler.project_path}")
-    print(f" Prefix:    {prefix or '(auto-detect)'}")
+    print(f" Prefix:    {ArchitectureHandler.prefix or '(all)'}")
     print(f" URL:       http://localhost:{port}")
     print(f" LiveSync:  Watching .codegraph/codegraph.db & policy")
     print(f" Agent:     Autonomous Headless Daemon Active")
     print(f"=======================================================\n")
+    sys.stdout.flush()
 
     http.server.ThreadingHTTPServer.allow_reuse_address = True
     with http.server.ThreadingHTTPServer(("", port), ArchitectureHandler) as httpd:
+        def shutdown_sig(sig, frame):
+            nonlocal httpd
+            global server_stopping
+            print(f"\nReceived signal {sig}. Shutting down server...")
+            server_stopping = True
+            if ArchitectureHandler.agent_worker:
+                ArchitectureHandler.agent_worker.stop()
+            threading.Thread(target=httpd.shutdown).start()
+
+        signal.signal(signal.SIGTERM, shutdown_sig)
+        signal.signal(signal.SIGINT, shutdown_sig)
+
         try:
             httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("\nShutting down server.")
+        except Exception:
+            pass
+        finally:
             server_stopping = True
             if ArchitectureHandler.agent_worker:
                 ArchitectureHandler.agent_worker.stop()
 
 
 if __name__ == "__main__":
-    proj = sys.argv[1] if len(sys.argv) > 1 else "/home/vt/projects/organizations"
-    pfx = sys.argv[2] if len(sys.argv) > 2 else "OrgStructure"
-    run_server(proj, prefix=pfx)
+    parser = argparse.ArgumentParser(description=".NET Clean Architecture & UML Viewer Server")
+    parser.add_argument("project", nargs="?", default=".", help="Target project root directory (default: current directory)")
+    parser.add_argument("prefix", nargs="?", default="", help="Namespace prefix (default: auto-detected)")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help=f"Port to listen on (default: {DEFAULT_PORT})")
+    parser.add_argument("--policy", default="", help="Path to policy.json file")
+
+    args = parser.parse_args()
+    proj = os.path.abspath(args.project)
+    pfx = args.prefix or auto_detect_prefix(proj)
+    run_server(proj, prefix=pfx, policy_path=args.policy, port=args.port)
