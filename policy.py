@@ -220,21 +220,38 @@ class ArchitecturePolicy:
 
         return cycles
 
-    def evaluate_graph(self, graph_data: Dict) -> Dict:
+    def evaluate_graph(self, graph_data: Dict, proposal: Optional[Dict] = None) -> Dict:
         """
         Assigns layers to all classes and validates all edges and Clean Architecture rules.
+        Supports What-If simulated proposals (layer overrides, omitted edges, proposed edges).
         Returns enriched graph data with violation flags and stats.
         """
         classes = graph_data.get("classes", [])
         edges = graph_data.get("edges", [])
 
+        # What-If Proposal parameters
+        layer_overrides = proposal.get("layer_overrides", {}) if proposal else {}
+        omitted_edge_keys = set()
+        if proposal:
+            for oe in proposal.get("omitted_edges", []):
+                omitted_edge_keys.add((oe.get("from"), oe.get("to")))
+
         class_by_id = {}
         unassigned_classes = []
 
         for c in classes:
-            layer = self.assign_layer(c["namespace"])
-            c["layer"] = layer
-            c["layer_rank"] = self.layer_ranks.get(layer) if layer else None
+            cname = c.get("name")
+            if cname in layer_overrides:
+                layer = layer_overrides[cname]
+                c["layer"] = layer
+                c["layer_rank"] = self.layer_ranks.get(layer) if layer else None
+                c["is_proposed"] = True
+                c["original_layer"] = self.assign_layer(c["namespace"])
+            else:
+                layer = self.assign_layer(c["namespace"])
+                c["layer"] = layer
+                c["layer_rank"] = self.layer_ranks.get(layer) if layer else None
+                c["is_proposed"] = False
             class_by_id[c["id"]] = c
             if not layer:
                 unassigned_classes.append(c)
@@ -246,6 +263,24 @@ class ArchitecturePolicy:
         for e in edges:
             src = class_by_id.get(e["from"])
             tgt = class_by_id.get(e["to"])
+
+            src_name = src["name"] if src else "Unknown"
+            tgt_name = tgt["name"] if tgt else "Unknown"
+
+            is_omitted = (src_name, tgt_name) in omitted_edge_keys or (e["from"], e["to"]) in omitted_edge_keys
+            if is_omitted:
+                edge_copy = dict(e)
+                edge_copy["from_class"] = src_name
+                edge_copy["to_class"] = tgt_name
+                edge_copy["from_namespace"] = src["namespace"] if src else "Unknown"
+                edge_copy["to_namespace"] = tgt["namespace"] if tgt else "Unknown"
+                edge_copy["from_layer"] = src.get("layer") if src else None
+                edge_copy["to_layer"] = tgt.get("layer") if tgt else None
+                edge_copy["violating"] = False
+                edge_copy["is_omitted"] = True
+                edge_copy["is_cycle"] = False
+                enriched_edges.append(edge_copy)
+                continue
 
             src_layer = src.get("layer") if src else None
             tgt_layer = tgt.get("layer") if tgt else None
@@ -261,6 +296,7 @@ class ArchitecturePolicy:
             edge_copy["to_layer"] = tgt_layer
             edge_copy["violating"] = not is_valid
             edge_copy["is_cycle"] = False
+            edge_copy["is_omitted"] = False
 
             if not is_valid:
                 edge_copy["violation_reason"] = reason
@@ -280,6 +316,33 @@ class ArchitecturePolicy:
                 })
 
             enriched_edges.append(edge_copy)
+
+        # Append proposed edges if any
+        if proposal:
+            for pe in proposal.get("proposed_edges", []):
+                src_c = next((c for c in classes if c["name"] == pe.get("from") or c["id"] == pe.get("from")), None)
+                tgt_c = next((c for c in classes if c["name"] == pe.get("to") or c["id"] == pe.get("to")), None)
+                if src_c and tgt_c:
+                    src_layer = src_c.get("layer")
+                    tgt_layer = tgt_c.get("layer")
+                    is_valid, reason = self.validate_dependency(src_layer, tgt_layer)
+                    enriched_edges.append({
+                        "from": src_c["id"],
+                        "to": tgt_c["id"],
+                        "from_class": src_c["name"],
+                        "to_class": tgt_c["name"],
+                        "from_namespace": src_c["namespace"],
+                        "to_namespace": tgt_c["namespace"],
+                        "from_layer": src_layer,
+                        "to_layer": tgt_layer,
+                        "kind": pe.get("kind", "implements"),
+                        "raw_kind": pe.get("kind", "implements"),
+                        "line": 1,
+                        "violating": not is_valid,
+                        "violation_reason": reason,
+                        "is_proposed": True,
+                        "is_cycle": False
+                    })
 
         # 2. Framework Isolation validation (Domain cannot touch frameworks)
         for c in classes:
@@ -355,6 +418,7 @@ class ArchitecturePolicy:
             "external_packages": graph_data.get("external_packages", []),
             "violations": violations,
             "unassigned_classes": [uc["name"] for uc in unassigned_classes],
+            "active_proposal": proposal,
             "stats": {
                 "total_classes": len(classes),
                 "total_edges": len(enriched_edges),

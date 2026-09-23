@@ -3,6 +3,7 @@ server.py - Local HTTP server for .NET Architecture & UML Viewer.
 Serves the web dashboard, REST API, and provides instant live-reload via Server-Sent Events (SSE).
 """
 
+import datetime
 import glob
 import http.server
 import json
@@ -147,13 +148,17 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
 
         if path == "/api/graph":
-            self._handle_get_graph()
+            self._handle_get_graph(query)
         elif path == "/api/events":
             self._handle_sse_stream()
         elif path == "/api/file":
             self._handle_get_file(query)
         elif path == "/api/violations":
             self._handle_get_violations()
+        elif path == "/api/agent/tasks":
+            self._handle_get_agent_tasks()
+        elif path == "/api/agent/proposals":
+            self._handle_get_proposals()
         else:
             super().do_GET()
 
@@ -169,6 +174,12 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(b'{"status": "ok", "message": "Reload event broadcasted"}\n')
         elif parsed.path == "/api/open":
             self._handle_open_editor()
+        elif parsed.path == "/api/agent/tasks":
+            self._handle_post_agent_task()
+        elif parsed.path == "/api/agent/tasks/resolve":
+            self._handle_resolve_agent_task()
+        elif parsed.path == "/api/agent/proposals":
+            self._handle_post_proposal()
         else:
             self.send_response(404)
             self.end_headers()
@@ -265,8 +276,183 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             with subscribers_lock:
                 subscribers.discard(client_queue)
 
-    def _handle_get_graph(self):
+    def _get_mailbox_dir(self):
+        d = os.path.join(self.project_path, ".uml-viewer")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _get_agent_tasks(self):
+        fpath = os.path.join(self._get_mailbox_dir(), "tasks.json")
+        if os.path.isfile(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return []
+        return []
+
+    def _save_agent_tasks(self, tasks):
+        fpath = os.path.join(self._get_mailbox_dir(), "tasks.json")
+        with open(fpath, "w", encoding="utf-8") as f:
+            json.dump(tasks, f, indent=2)
+
+    def _get_proposals(self):
+        fpath = os.path.join(self._get_mailbox_dir(), "proposals.json")
+        if os.path.isfile(fpath):
+            try:
+                with open(fpath, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception:
+                return []
+        default_proposals = [{
+            "id": "prop-invert-dataprovider",
+            "name": "Simulate: Decouple DataProvider",
+            "author": "AI Copilot",
+            "description": "Simulate introducing abstractions to decouple Domain interfaces from concrete Infrastructure DataProvider.",
+            "layer_overrides": {
+                "SubmittedTriplogService": "Infrastructure"
+            },
+            "omitted_edges": [
+                {"from": "IDataProvider", "to": "DataProvider"},
+                {"from": "IDataExecutor", "to": "DataExecutor"},
+                {"from": "ILegacyDataProvider", "to": "DataProvider"}
+            ],
+            "proposed_edges": [],
+            "created_at": datetime.datetime.now().isoformat()
+        }]
+        self._save_proposals(default_proposals)
+        return default_proposals
+
+    def _save_proposals(self, proposals):
+        fpath = os.path.join(self._get_mailbox_dir(), "proposals.json")
+        with open(fpath, "w", encoding="utf-8") as f:
+            json.dump(proposals, f, indent=2)
+
+    def _handle_get_agent_tasks(self):
+        tasks = self._get_agent_tasks()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps(tasks, indent=2).encode("utf-8"))
+
+    def _handle_post_agent_task(self):
         try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8")
+            data = json.loads(body) if body else {}
+
+            task = {
+                "id": f"task-{int(time.time()*1000)}",
+                "timestamp": datetime.datetime.now().isoformat(),
+                "op": data.get("op", "fix_violation"),
+                "title": data.get("title", "Architecture Copilot Task"),
+                "prompt": data.get("prompt", ""),
+                "target": data.get("target", {}),
+                "status": "pending",
+                "result": None
+            }
+            tasks = self._get_agent_tasks()
+            tasks.insert(0, task)
+            self._save_agent_tasks(tasks)
+
+            print(f"[Copilot] New task queued: {task['id']} - {task['title']}")
+            notify_all({"type": "agent_task_queued", "task": task})
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok", "task": task}).encode("utf-8"))
+        except Exception as e:
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+
+    def _handle_resolve_agent_task(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8")
+            data = json.loads(body) if body else {}
+
+            task_id = data.get("task_id")
+            status = data.get("status", "completed")
+            result = data.get("result", "Task resolved by agent.")
+
+            tasks = self._get_agent_tasks()
+            found = False
+            for t in tasks:
+                if t.get("id") == task_id:
+                    t["status"] = status
+                    t["result"] = result
+                    t["resolved_at"] = datetime.datetime.now().isoformat()
+                    found = True
+                    break
+
+            if found:
+                self._save_agent_tasks(tasks)
+                notify_all({"type": "agent_task_updated", "task_id": task_id, "status": status})
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok" if found else "not_found"}).encode("utf-8"))
+        except Exception as e:
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+
+    def _handle_get_proposals(self):
+        proposals = self._get_proposals()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps(proposals, indent=2).encode("utf-8"))
+
+    def _handle_post_proposal(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8")
+            prop = json.loads(body) if body else {}
+
+            if not prop.get("id"):
+                prop["id"] = f"prop-{int(time.time()*1000)}"
+            if not prop.get("created_at"):
+                prop["created_at"] = datetime.datetime.now().isoformat()
+
+            proposals = self._get_proposals()
+            idx = next((i for i, p in enumerate(proposals) if p.get("id") == prop.get("id")), -1)
+            if idx >= 0:
+                proposals[idx] = prop
+            else:
+                proposals.append(prop)
+
+            self._save_proposals(proposals)
+            notify_all({"type": "proposals_updated", "proposal": prop})
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok", "proposal": prop}).encode("utf-8"))
+        except Exception as e:
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+
+    def _handle_get_graph(self, query=None):
+        try:
+            proposal_id = query.get("proposal_id", [""])[0] if query else ""
+            selected_proposal = None
+            if proposal_id:
+                proposals = self._get_proposals()
+                selected_proposal = next((p for p in proposals if p.get("id") == proposal_id), None)
+
             ext = CodeGraphExtractor(self.project_path, prefix=self.prefix)
             raw_graph = ext.extract()
 
@@ -275,7 +461,7 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 policy = ArchitecturePolicy()
 
-            evaluated = policy.evaluate_graph(raw_graph)
+            evaluated = policy.evaluate_graph(raw_graph, proposal=selected_proposal)
 
             metrics_engine = QualityMetricsEngine(self.project_path)
             enriched = metrics_engine.enrich_graph_with_metrics(evaluated)

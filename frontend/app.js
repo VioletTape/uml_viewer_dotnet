@@ -22,11 +22,16 @@ const canvas = document.getElementById("canvas");
 const svgEdges = document.getElementById("svg-edges");
 const layersContainer = document.getElementById("layers-container");
 
+let activeProposalId = "";
+let availableProposals = [];
+let agentTasks = [];
+
 async function init() {
   setupPanZoom();
   setupTabs();
   setupToolbar();
   setupLiveSync();
+  await fetchProposals();
   await loadGraph();
 }
 
@@ -49,6 +54,16 @@ function setupLiveSync() {
         const data = JSON.parse(event.data);
         if (data.type === "reload") {
           showToast(data.reason || "Architecture updated");
+          loadGraph();
+        } else if (data.type === "agent_task_queued") {
+          showToast(`🤖 Task queued: ${data.task.title}`);
+          fetchAgentTasks();
+        } else if (data.type === "agent_task_updated") {
+          showToast(`🤖 Task updated: ${data.status}`);
+          fetchAgentTasks();
+        } else if (data.type === "proposals_updated") {
+          showToast("📐 Proposals updated");
+          fetchProposals();
           loadGraph();
         }
       } catch (e) {
@@ -108,12 +123,120 @@ async function openInEditor(filePath, line = 1, event = null) {
 
 async function loadGraph() {
   try {
-    const res = await fetch("/api/graph");
+    const url = activeProposalId 
+      ? `/api/graph?proposal_id=${encodeURIComponent(activeProposalId)}`
+      : `/api/graph`;
+    const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     graphData = await res.json();
     renderAll();
+    await fetchAgentTasks();
   } catch (err) {
     console.error("Failed to load architecture graph:", err);
+  }
+}
+
+async function fetchProposals() {
+  try {
+    const res = await fetch("/api/agent/proposals");
+    if (!res.ok) return;
+    availableProposals = await res.json();
+    renderProposalSelector();
+  } catch (err) {
+    console.error("Failed to load proposals:", err);
+  }
+}
+
+function renderProposalSelector() {
+  const select = document.getElementById("proposal-select");
+  if (!select) return;
+
+  const currentVal = activeProposalId;
+  select.innerHTML = `
+    <option value="">Real Codebase</option>
+    ${availableProposals.map(p => `
+      <option value="${p.id}" ${p.id === currentVal ? "selected" : ""}>
+        Simulate: ${escapeHtml(p.name)}
+      </option>
+    `).join("")}
+  `;
+
+  select.onchange = async (e) => {
+    activeProposalId = e.target.value;
+    if (activeProposalId) {
+      const p = availableProposals.find(item => item.id === activeProposalId);
+      showToast(`Switched to Proposal: ${p ? p.name : activeProposalId}`);
+    } else {
+      showToast("Viewing Real Codebase");
+    }
+    await loadGraph();
+  };
+}
+
+async function fetchAgentTasks() {
+  try {
+    const res = await fetch("/api/agent/tasks");
+    if (!res.ok) return;
+    agentTasks = await res.json();
+    renderCopilotTasks(agentTasks);
+  } catch (err) {
+    console.error("Failed to load agent tasks:", err);
+  }
+}
+
+function renderCopilotTasks(tasks) {
+  const container = document.getElementById("copilot-tasks-list");
+  const badge = document.getElementById("tab-copilot-count");
+  if (!container) return;
+
+  const pendingCount = tasks.filter(t => t.status === "pending").length;
+  if (badge) badge.textContent = pendingCount;
+
+  if (tasks.length === 0) {
+    container.innerHTML = '<div class="empty-state">No agent tasks queued. Click <strong>"Fix with Agent"</strong> on any violation card!</div>';
+    return;
+  }
+
+  container.innerHTML = tasks.map(t => {
+    let statusBadge = `<span class="badge badge-pending" style="background: rgba(210, 153, 34, 0.2); color: #d29922; border: 1px solid rgba(210, 153, 34, 0.4); padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600;">PENDING</span>`;
+    if (t.status === "completed") {
+      statusBadge = `<span class="badge badge-completed" style="background: rgba(46, 160, 67, 0.2); color: #3fb950; border: 1px solid rgba(46, 160, 67, 0.4); padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600;">COMPLETED</span>`;
+    } else if (t.status === "in_progress") {
+      statusBadge = `<span class="badge badge-progress" style="background: rgba(88, 166, 255, 0.2); color: #58a6ff; border: 1px solid rgba(88, 166, 255, 0.4); padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: 600;">IN PROGRESS</span>`;
+    }
+
+    const timeStr = t.timestamp ? new Date(t.timestamp).toLocaleTimeString() : "";
+
+    return `
+      <div class="agent-task-card" style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border); border-radius: 6px; padding: 10px; margin-bottom: 8px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+          <strong style="font-size: 12px; color: #e6edf3;">${escapeHtml(t.title)}</strong>
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <span style="font-size: 10px; color: #8b949e;">${timeStr}</span>
+            ${statusBadge}
+          </div>
+        </div>
+        <p style="font-size: 11px; color: #8b949e; margin: 4px 0 8px 0; line-height: 1.4;">${escapeHtml(t.prompt)}</p>
+        ${t.result ? `<div style="background: rgba(46, 160, 67, 0.1); border-left: 2px solid #3fb950; padding: 6px 8px; font-size: 11px; color: #7ee787; margin-bottom: 6px;">${escapeHtml(t.result)}</div>` : ''}
+        <div style="display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: #8b949e;">
+          <span>ID: <code>${t.id}</code></span>
+          ${t.status === 'pending' ? `<button class="btn btn-sm" onclick="markTaskResolved('${t.id}')" style="font-size: 9px; padding: 2px 6px;">Mark Done</button>` : ''}
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+async function markTaskResolved(taskId) {
+  try {
+    await fetch("/api/agent/tasks/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task_id: taskId, status: "completed", result: "Completed by agent" })
+    });
+    fetchAgentTasks();
+  } catch (err) {
+    console.error(err);
   }
 }
 
@@ -247,13 +370,23 @@ function renderLayers() {
           card.classList.add("has-violation");
         }
 
+        if (cls.is_proposed) {
+          card.classList.add("proposed-class");
+        }
+
         const stereotype = cls.stereotype ? `&lt;&lt;${cls.stereotype}&gt;&gt;` : "";
         const risk = cls.risk || "green";
         const crap = cls.crap || 1;
+        const proposedBadge = cls.is_proposed 
+          ? `<span style="font-size: 9px; background: rgba(56, 139, 253, 0.25); color: #58a6ff; border: 1px solid rgba(56, 139, 253, 0.5); padding: 1px 4px; border-radius: 3px; font-weight: 600;" title="Proposed layer move from ${cls.original_layer || 'original'}">PROPOSED</span>` 
+          : "";
 
         card.innerHTML = `
           <div class="card-top">
-            <span class="card-stereotype">${stereotype}</span>
+            <div style="display: flex; align-items: center; gap: 4px;">
+              <span class="card-stereotype">${stereotype}</span>
+              ${proposedBadge}
+            </div>
             <div style="display: flex; align-items: center; gap: 5px;">
               <span class="crap-pill ${risk}">CRAP ${crap}</span>
               <span class="risk-dot ${risk}" title="Risk: ${risk} (CRAP ${crap})"></span>
@@ -389,6 +522,35 @@ function drawEdges() {
     }
 
     const pathD = `M ${x1} ${y1} C ${c1x} ${c1y}, ${c2x} ${c2y}, ${x2} ${y2}`;
+
+    if (e.is_omitted) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", pathD);
+      path.setAttribute("class", "edge-line omitted");
+      path.setAttribute("style", "stroke: #3fb950; opacity: 0.45; stroke-dasharray: 4 4;");
+      path.dataset.from = e.from;
+      path.dataset.to = e.to;
+      const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+      title.textContent = `SIMULATED RESOLUTION: Decoupled ${e.from_class} -> ${e.to_class}`;
+      path.appendChild(title);
+      svgEdges.appendChild(path);
+      return;
+    }
+
+    if (e.is_proposed) {
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.setAttribute("d", pathD);
+      path.setAttribute("class", "edge-line proposed");
+      path.setAttribute("style", "stroke: #58a6ff; opacity: 0.85; stroke-dasharray: 6 3;");
+      path.setAttribute("marker-end", "url(#arrow-highlight)");
+      path.dataset.from = e.from;
+      path.dataset.to = e.to;
+      const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+      title.textContent = `PROPOSED INTERFACE: ${e.from_class} -> ${e.to_class}`;
+      path.appendChild(title);
+      svgEdges.appendChild(path);
+      return;
+    }
 
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("d", pathD);
@@ -641,11 +803,47 @@ function renderViolationsList() {
       <div class="viol-reason">${escapeHtml(v.reason)}</div>
       <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 6px;">
         <div class="viol-loc">📍 ${escapeHtml(v.file_path || "Unknown")}:${v.line || 1}</div>
-        ${v.file_path ? `<button class="btn btn-sm" onclick="openInEditor('${v.file_path}', ${v.line || 1}, event)" style="font-size: 10px; padding: 2px 8px; background: rgba(56, 139, 253, 0.15); border-color: rgba(56, 139, 253, 0.4); color: #58a6ff;" title="Open in VS Code">✎ Edit</button>` : ''}
+        <div style="display: flex; gap: 6px;">
+          ${v.file_path ? `<button class="btn btn-sm" onclick="openInEditor('${v.file_path}', ${v.line || 1}, event)" style="font-size: 10px; padding: 2px 8px; background: rgba(56, 139, 253, 0.15); border-color: rgba(56, 139, 253, 0.4); color: #58a6ff;" title="Open in VS Code">✎ Edit</button>` : ''}
+          <button class="btn btn-sm" onclick="askAgentToFix(${i}, event)" style="font-size: 10px; padding: 2px 8px; background: rgba(163, 113, 247, 0.15); border-color: rgba(163, 113, 247, 0.4); color: #d2a8ff;" title="Queue refactoring task for AI Agent">🤖 Fix with Agent</button>
+        </div>
       </div>
     </div>
   `;
   }).join("");
+}
+
+async function askAgentToFix(violationIndex, event) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  const v = graphData.violations[violationIndex];
+  if (!v) return;
+
+  const prompt = `Refactor '${v.from_class}' to eliminate the Clean Architecture violation with '${v.to_class}'. Apply the Dependency Inversion Principle (DIP) or introduce an interface/port abstraction in the Contracts/Application layer.`;
+
+  showToast(`Queueing task for AI Copilot...`);
+  try {
+    const res = await fetch("/api/agent/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "fix_violation",
+        title: `Decouple ${v.from_class} from ${v.to_class}`,
+        target: v,
+        prompt: prompt
+      })
+    });
+    const data = await res.json();
+    if (data.status === "ok") {
+      showToast(`🤖 Task queued for AI Copilot!`);
+      await fetchAgentTasks();
+      switchTab("tab-copilot");
+    }
+  } catch (err) {
+    showToast(`Error queueing agent task: ${err.message}`);
+  }
 }
 
 function focusViolation(className) {
@@ -760,6 +958,42 @@ function setupToolbar() {
   });
 
   document.getElementById("btn-refresh").addEventListener("click", loadGraph);
+
+  const btnProposeAll = document.getElementById("btn-agent-propose-all");
+  if (btnProposeAll) {
+    btnProposeAll.addEventListener("click", async () => {
+      showToast("Queuing AI Copilot architecture proposal...");
+      await fetch("/api/agent/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "propose_refactor",
+          title: "Propose Clean Architecture Decoupling",
+          prompt: "Analyze all current violations and create a What-If proposal decoupling the core Domain and Application layers from Infrastructure implementations."
+        })
+      });
+      await fetchAgentTasks();
+      switchTab("tab-copilot");
+    });
+  }
+
+  const btnRefreshMetrics = document.getElementById("btn-agent-refresh-metrics");
+  if (btnRefreshMetrics) {
+    btnRefreshMetrics.addEventListener("click", async () => {
+      showToast("Requesting metrics & test coverage refresh...");
+      await fetch("/api/agent/tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          op: "refresh_crap",
+          title: "Re-run Coverage & Recalculate CRAP",
+          prompt: "Execute dotnet test --collect:\"XPlat Code Coverage\" and recalculate cyclomatic complexity and CRAP scores."
+        })
+      });
+      await fetchAgentTasks();
+      switchTab("tab-copilot");
+    });
+  }
 }
 
 function setupTabs() {

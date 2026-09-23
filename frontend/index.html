@@ -54,6 +54,13 @@
         <button id="btn-zoom-out" class="btn btn-icon" title="Zoom Out">-</button>
       </div>
 
+      <div class="proposal-selector-wrapper" style="display: flex; align-items: center; margin-right: 6px;">
+        <label for="proposal-select" style="font-size: 11px; color: #8b949e; margin-right: 6px; font-weight: 500;">📐 Arch Mode:</label>
+        <select id="proposal-select" class="btn btn-sm" style="background: #21262d; color: #58a6ff; border-color: #30363d; font-size: 11px; padding: 4px 8px; border-radius: 6px; font-weight: 600; cursor: pointer;">
+          <option value="">Real Codebase</option>
+        </select>
+      </div>
+
       <button id="btn-toggle-crap" class="btn" title="Toggle CRAP risk scores and traffic lights">🎯 CRAP Overlay</button>
       <button id="btn-refresh" class="btn btn-primary" title="Refresh code graph from codegraph.db">↻ Refresh</button>
     </div>
@@ -88,6 +95,7 @@
         <button class="tab-btn" data-tab="tab-inspector">Inspector</button>
         <button class="tab-btn" data-tab="tab-quality">Quality / CRAP</button>
         <button class="tab-btn" data-tab="tab-nuget">NuGet</button>
+        <button class="tab-btn" data-tab="tab-copilot">🤖 Copilot (<span id="tab-copilot-count">0</span>)</button>
       </div>
 
       <div class="panel-body">
@@ -132,6 +140,21 @@
           </div>
           <div class="nuget-list" id="nuget-list">
             <div class="empty-state">No external packages found</div>
+          </div>
+        </div>
+
+        <!-- Tab 5: AI Copilot Mailbox & Proposals -->
+        <div class="tab-content" id="tab-copilot">
+          <div class="tab-header">
+            <h3>🤖 AI Copilot Mailbox</h3>
+            <p class="tab-desc">Interactive pairing tasks & What-If refactoring proposals for AI Agent.</p>
+          </div>
+          <div class="copilot-controls" style="margin-bottom: 12px; display: flex; gap: 8px;">
+            <button id="btn-agent-propose-all" class="btn btn-sm btn-primary" style="flex: 1; font-size: 11px; padding: 6px 10px;" title="Ask AI Agent to propose refactorings for all current violations">🤖 Propose Architecture Fixes</button>
+            <button id="btn-agent-refresh-metrics" class="btn btn-sm" style="font-size: 11px; padding: 6px 10px;" title="Queue coverage and CRAP metric refresh">↻ Refresh Metrics</button>
+          </div>
+          <div id="copilot-tasks-list" class="copilot-tasks-list">
+            <div class="empty-state">No active agent tasks. Click "Fix with Agent" on any violation card!</div>
           </div>
         </div>
       </div>

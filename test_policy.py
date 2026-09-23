@@ -139,6 +139,53 @@ class TestArchitecturePolicy(unittest.TestCase):
         # 3. Layer Completeness: OrphanHelper has no layer
         self.assertIn("unassigned_layer", categories)
 
+    def test_evaluate_graph_with_what_if_proposal(self):
+        graph_data = {
+            "classes": [
+                {
+                    "id": "c_order",
+                    "name": "Order",
+                    "namespace": "MyApp.Domain.Entities",
+                    "external_refs": [],
+                    "file_path": "src/Domain/Order.cs",
+                    "start_line": 5
+                },
+                {
+                    "id": "c_repo",
+                    "name": "OrderRepository",
+                    "namespace": "MyApp.Infrastructure.Data",
+                    "external_refs": [],
+                    "file_path": "src/Infrastructure/OrderRepository.cs",
+                    "start_line": 8
+                }
+            ],
+            "edges": [
+                {
+                    "from": "c_order",
+                    "to": "c_repo",
+                    "kind": "dependency",
+                    "line": 12
+                }
+            ]
+        }
+        # Baseline without proposal has 1 violation
+        res_baseline = self.policy.evaluate_graph(graph_data)
+        self.assertEqual(len(res_baseline["violations"]), 1)
+
+        # What-If proposal decoupling the two classes
+        proposal = {
+            "id": "prop-1",
+            "name": "Decouple Order from Repo",
+            "layer_overrides": {},
+            "omitted_edges": [{"from": "Order", "to": "OrderRepository"}],
+            "proposed_edges": []
+        }
+        res_proposed = self.policy.evaluate_graph(graph_data, proposal=proposal)
+        # Violation is resolved!
+        self.assertEqual(len(res_proposed["violations"]), 0)
+        self.assertTrue(res_proposed["edges"][0]["is_omitted"])
+        self.assertEqual(res_proposed["active_proposal"]["id"], "prop-1")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -743,4 +743,19 @@ path.edge-line.highlight {
   gap: 12px;
 }
 
+/* Copilot & What-If Proposals */
+.class-card.proposed-class {
+  border-color: #58a6ff !important;
+  box-shadow: 0 0 10px rgba(88, 166, 255, 0.3) !important;
+}
+
+.agent-task-card {
+  transition: all 0.15s ease;
+}
+
+.agent-task-card:hover {
+  background: rgba(255, 255, 255, 0.05) !important;
+  border-color: rgba(163, 113, 247, 0.4) !important;
+}
+
 
