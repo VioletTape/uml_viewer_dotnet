@@ -103,7 +103,7 @@ class CodeGraphExtractor:
         # 2. Fetch members (methods, properties, fields) for internal types
         if nodes_by_id:
             cursor.execute("""
-                SELECT n.id, n.kind, n.name, n.signature, n.visibility, n.start_line, e.source AS parent_id
+                SELECT n.id, n.kind, n.name, n.signature, n.visibility, n.start_line, n.end_line, e.source AS parent_id
                 FROM nodes n
                 JOIN edges e ON e.target = n.id
                 WHERE e.kind = 'contains' AND n.kind IN ('method', 'property', 'field')
@@ -117,7 +117,8 @@ class CodeGraphExtractor:
                         "name": row["name"],
                         "signature": row["signature"],
                         "visibility": row["visibility"],
-                        "line": row["start_line"]
+                        "line": row["start_line"],
+                        "end_line": row["end_line"]
                     })
 
         # 3. Extract relationships between internal types

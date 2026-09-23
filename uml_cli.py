@@ -35,13 +35,15 @@ def ensure_daemon_dir():
     os.makedirs(DAEMON_DIR, exist_ok=True)
 
 
-def is_process_alive(pid: int) -> bool:
-    if pid <= 0:
+def is_viewer_process(pid: int) -> bool:
+    """Recognize our daemon, including when a stale PID has been reused (Linux/WSL)."""
+    if not isinstance(pid, int) or pid <= 0:
         return False
     try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            args = f.read().split(b"\0")
+        return len(args) > 1 and os.fsdecode(args[1]) == SERVER_PY
+    except OSError:
         return False
 
 
@@ -52,9 +54,9 @@ def get_daemon_state() -> Optional[Dict]:
         with open(DAEMON_FILE, "r", encoding="utf-8") as f:
             state = json.load(f)
         pid = state.get("pid")
-        if pid and is_process_alive(pid):
+        if pid and is_viewer_process(pid):
             return state
-        # Process is dead, remove stale file
+        # Process exited or PID was reused; remove stale state
         try:
             os.remove(DAEMON_FILE)
         except OSError:
@@ -245,22 +247,6 @@ def cmd_stop(args=None):
     state = get_daemon_state()
 
     if not state:
-        # Check if any orphan server.py is running
-        try:
-            out = subprocess.check_output(["pgrep", "-f", "server.py"], text=True)
-            pids = [int(p) for p in out.strip().split() if p.isdigit()]
-            for pid in pids:
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                except OSError:
-                    pass
-            if pids and not quiet:
-                print(f"✔ Stopped orphan UML Viewer processes (PIDs: {', '.join(map(str, pids))}).")
-                remove_daemon_state()
-                return
-        except Exception:
-            pass
-
         if not quiet:
             print("○ UML Viewer is not currently running.")
         return
@@ -274,7 +260,7 @@ def cmd_stop(args=None):
     try:
         os.kill(pid, signal.SIGTERM)
         for _ in range(30):
-            if not is_process_alive(pid):
+            if not is_viewer_process(pid):
                 break
             time.sleep(0.1)
         else:

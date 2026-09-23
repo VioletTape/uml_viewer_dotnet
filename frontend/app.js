@@ -155,7 +155,7 @@ function renderProposalSelector() {
   select.innerHTML = `
     <option value="">Real Codebase</option>
     ${availableProposals.map(p => `
-      <option value="${p.id}" ${p.id === currentVal ? "selected" : ""}>
+      <option value="${escapeHtml(p.id)}" ${p.id === currentVal ? "selected" : ""}>
         Simulate: ${escapeHtml(p.name)}
       </option>
     `).join("")}
@@ -219,8 +219,8 @@ function renderCopilotTasks(tasks) {
         <p style="font-size: 11px; color: #8b949e; margin: 4px 0 8px 0; line-height: 1.4;">${escapeHtml(t.prompt)}</p>
         ${t.result ? `<div style="background: rgba(46, 160, 67, 0.1); border-left: 2px solid #3fb950; padding: 6px 8px; font-size: 11px; color: #7ee787; margin-bottom: 6px;">${escapeHtml(t.result)}</div>` : ''}
         <div style="display: flex; justify-content: space-between; align-items: center; font-size: 10px; color: #8b949e;">
-          <span>ID: <code>${t.id}</code></span>
-          ${t.status === 'pending' ? `<button class="btn btn-sm" onclick="markTaskResolved('${t.id}')" style="font-size: 9px; padding: 2px 6px;">Mark Done</button>` : ''}
+          <span>ID: <code>${escapeHtml(t.id)}</code></span>
+          ${t.status === 'pending' ? `<button class="btn btn-sm" onclick="markTaskResolved(${htmlJs(t.id)})" style="font-size: 9px; padding: 2px 6px;">Mark Done</button>` : ''}
         </div>
       </div>
     `;
@@ -280,10 +280,10 @@ function renderLayers() {
   const classes = graphData.classes || [];
 
   // Group classes by layer, then by namespace
-  const layerGroups = {};
+  const layerGroups = Object.create(null);
   classes.forEach(c => {
     const layer = c.layer || "Unassigned";
-    if (!layerGroups[layer]) layerGroups[layer] = {};
+    if (!layerGroups[layer]) layerGroups[layer] = Object.create(null);
     const ns = c.namespace || "(Root)";
     if (!layerGroups[layer][ns]) layerGroups[layer][ns] = [];
     layerGroups[layer][ns].push(c);
@@ -311,7 +311,7 @@ function renderLayers() {
 
     const header = document.createElement("div");
     header.className = "layer-header";
-    header.innerHTML = `<span>${layerName}</span> <span class="ns-count">${totalClassesInLayer}</span>`;
+    header.innerHTML = `<span>${escapeHtml(layerName)}</span> <span class="ns-count">${totalClassesInLayer}</span>`;
     column.appendChild(header);
 
     const classesDiv = document.createElement("div");
@@ -374,11 +374,11 @@ function renderLayers() {
           card.classList.add("proposed-class");
         }
 
-        const stereotype = cls.stereotype ? `&lt;&lt;${cls.stereotype}&gt;&gt;` : "";
+        const stereotype = cls.stereotype ? `&lt;&lt;${escapeHtml(cls.stereotype)}&gt;&gt;` : "";
         const risk = cls.risk || "green";
         const crap = cls.crap || 1;
         const proposedBadge = cls.is_proposed 
-          ? `<span style="font-size: 9px; background: rgba(56, 139, 253, 0.25); color: #58a6ff; border: 1px solid rgba(56, 139, 253, 0.5); padding: 1px 4px; border-radius: 3px; font-weight: 600;" title="Proposed layer move from ${cls.original_layer || 'original'}">PROPOSED</span>` 
+          ? `<span style="font-size: 9px; background: rgba(56, 139, 253, 0.25); color: #58a6ff; border: 1px solid rgba(56, 139, 253, 0.5); padding: 1px 4px; border-radius: 3px; font-weight: 600;" title="Proposed layer move from ${escapeHtml(cls.original_layer || 'original')}">PROPOSED</span>`
           : "";
 
         card.innerHTML = `
@@ -390,7 +390,7 @@ function renderLayers() {
             <div style="display: flex; align-items: center; gap: 5px;">
               <span class="crap-pill ${risk}">CRAP ${crap}</span>
               <span class="risk-dot ${risk}" title="Risk: ${risk} (CRAP ${crap})"></span>
-              <span style="font-size: 10px; color: #8b949e">${cls.visibility || ""}</span>
+              <span style="font-size: 10px; color: #8b949e">${escapeHtml(cls.visibility)}</span>
             </div>
           </div>
           <div class="card-name">${escapeHtml(cls.name)}</div>
@@ -667,20 +667,20 @@ function selectClass(cls, activeViolation = null) {
                   <span style="font-size: 10px; padding: 1px 6px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #8b949e;">${isOutgoing ? 'OUTGOING' : 'INCOMING'}</span>
                 </div>
                 <div class="viol-path" style="margin: 6px 0; font-size: 11px;">
-                  <strong>${escapeHtml(v.from_class)}</strong> (${v.from_layer || 'None'}) &rarr; <strong>${escapeHtml(v.to_class || 'None')}</strong> (${v.to_layer || 'None'})
+                  <strong>${escapeHtml(v.from_class)}</strong> (${escapeHtml(v.from_layer || 'None')}) &rarr; <strong>${escapeHtml(v.to_class || 'None')}</strong> (${escapeHtml(v.to_layer || 'None')})
                 </div>
                 <div class="viol-reason" style="font-size: 11px; margin-bottom: 6px; word-break: break-word; overflow-wrap: anywhere;">${escapeHtml(v.reason)}</div>
                 ${v.file_path ? `<div class="viol-loc" style="font-size: 10px; margin-bottom: 8px; word-break: break-all; overflow-wrap: anywhere; line-height: 1.4;">📍 ${escapeHtml(v.file_path)}:${v.line || 1}</div>` : ''}
                 
                 <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px;">
-                  <button class="btn btn-sm" onclick="askAgentToFixForViolation('${escapeHtml(v.from_class)}', '${escapeHtml(v.to_class || '')}', event)" style="font-size: 11px; padding: 3px 10px; background: #238636; border-color: #2ea043; color: #fff;" title="Autonomous AI Agent generates What-If DIP decoupling proposal">
+                  <button class="btn btn-sm" onclick="askAgentToFixForViolation(${htmlJs(v.from_class)}, ${htmlJs(v.to_class)}, event)" style="font-size: 11px; padding: 3px 10px; background: #238636; border-color: #2ea043; color: #fff;" title="Autonomous AI Agent generates What-If DIP decoupling proposal">
                     🤖 Fix with AI
                   </button>
-                  <button class="btn btn-sm" onclick="askAgentToExplainViolation('${escapeHtml(v.from_class)}', '${escapeHtml(v.to_class || '')}', event)" style="font-size: 11px; padding: 3px 10px; background: rgba(163, 113, 247, 0.15); border-color: rgba(163, 113, 247, 0.4); color: #d2a8ff;" title="AI explains Clean Architecture principles & solution">
+                  <button class="btn btn-sm" onclick="askAgentToExplainViolation(${htmlJs(v.from_class)}, ${htmlJs(v.to_class)}, event)" style="font-size: 11px; padding: 3px 10px; background: rgba(163, 113, 247, 0.15); border-color: rgba(163, 113, 247, 0.4); color: #d2a8ff;" title="AI explains Clean Architecture principles & solution">
                     💡 Explain with AI
                   </button>
                   ${v.file_path ? `
-                  <button class="btn btn-sm" onclick="openInEditor('${v.file_path}', ${v.line || 1}, event)" style="font-size: 11px; padding: 3px 10px; background: rgba(56, 139, 253, 0.15); border-color: rgba(56, 139, 253, 0.4); color: #58a6ff;" title="Open in VS Code">
+                  <button class="btn btn-sm" onclick="openInEditor(${htmlJs(v.file_path)}, ${v.line || 1}, event)" style="font-size: 11px; padding: 3px 10px; background: rgba(56, 139, 253, 0.15); border-color: rgba(56, 139, 253, 0.4); color: #58a6ff;" title="Open in VS Code">
                     ✎ Open in VS Code
                   </button>` : ''}
                 </div>
@@ -703,7 +703,7 @@ function selectClass(cls, activeViolation = null) {
   let membersHtml = "";
   if (cls.members && cls.members.length > 0) {
     membersHtml = cls.members.map(m => `
-      <div class="member-item" onclick="openInEditor('${cls.file_path}', ${m.start_line || m.line || 1}, event)" style="cursor: pointer; display: flex; justify-content: space-between; align-items: center;" title="Click to open in VS Code">
+      <div class="member-item" onclick="openInEditor(${htmlJs(cls.file_path)}, ${m.start_line || m.line || 1}, event)" style="cursor: pointer; display: flex; justify-content: space-between; align-items: center;" title="Click to open in VS Code">
         <div>
           <span style="color: #58a6ff">${escapeHtml(m.kind)}</span> 
           <strong>${escapeHtml(m.name)}</strong>
@@ -725,9 +725,9 @@ function selectClass(cls, activeViolation = null) {
     <div class="inspect-section">
       <h4>Location</h4>
       <p style="font-family: 'JetBrains Mono', monospace; font-size: 11px; word-break: break-all; color: #e6edf3">
-        ${cls.file_path}:${cls.start_line}-${cls.end_line}
+        ${escapeHtml(cls.file_path)}:${cls.start_line}-${cls.end_line}
       </p>
-      <button onclick="openInEditor('${cls.file_path}', ${cls.start_line || 1}, event)" class="vscode-btn">
+      <button onclick="openInEditor(${htmlJs(cls.file_path)}, ${cls.start_line || 1}, event)" class="vscode-btn">
         <span>✎ Open in VS Code (Line ${cls.start_line})</span>
       </button>
     </div>
@@ -845,7 +845,7 @@ function renderQualityTab() {
               <span>Layer: ${escapeHtml(m.layer)}</span>
               <span>Comp: ${m.complexity || 1}</span>
               <span>Cov: ${m.coverage_pct || 0}%</span>
-              <button onclick="openInEditor('${m.file_path}', ${m.start_line || m.line || 1}, event)" style="background: none; border: none; color: #58a6ff; cursor: pointer; font-size: 11px; margin-left: auto;">✎ Edit</button>
+              <button onclick="openInEditor(${htmlJs(m.file_path)}, ${m.start_line || m.line || 1}, event)" style="background: none; border: none; color: #58a6ff; cursor: pointer; font-size: 11px; margin-left: auto;">✎ Edit</button>
             </div>
           </div>
         `;
@@ -885,7 +885,7 @@ function renderViolationsList() {
         <span style="font-size: 10px; color: #8b949e">#${i + 1}</span>
       </div>
       <div class="viol-path">
-        <strong>${escapeHtml(v.from_class)}</strong> (${v.from_layer || 'None'}) → <strong>${escapeHtml(v.to_class || 'None')}</strong> (${v.to_layer || 'None'})
+        <strong>${escapeHtml(v.from_class)}</strong> (${escapeHtml(v.from_layer || 'None')}) → <strong>${escapeHtml(v.to_class || 'None')}</strong> (${escapeHtml(v.to_layer || 'None')})
       </div>
       <div class="viol-reason">${escapeHtml(v.reason)}</div>
       <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
@@ -948,20 +948,20 @@ function renderStandaloneViolationInspector(v) {
           <span style="color: ${catColor}; font-weight: 700; font-size: 11px;">⚠ ${catBadge}</span>
         </div>
         <div class="viol-path" style="margin: 6px 0; font-size: 11px; word-break: break-word; overflow-wrap: anywhere;">
-          <strong>${escapeHtml(v.from_class)}</strong> (${v.from_layer || 'None'}) &rarr; <strong>${escapeHtml(v.to_class || 'None')}</strong> (${v.to_layer || 'None'})
+          <strong>${escapeHtml(v.from_class)}</strong> (${escapeHtml(v.from_layer || 'None')}) &rarr; <strong>${escapeHtml(v.to_class || 'None')}</strong> (${escapeHtml(v.to_layer || 'None')})
         </div>
         <div class="viol-reason" style="font-size: 11px; margin-bottom: 6px; word-break: break-word; overflow-wrap: anywhere;">${escapeHtml(v.reason)}</div>
         ${v.file_path ? `<div class="viol-loc" style="font-size: 10px; margin-bottom: 8px; word-break: break-all; overflow-wrap: anywhere; line-height: 1.4;">📍 ${escapeHtml(v.file_path)}:${v.line || 1}</div>` : ''}
 
         <div style="display: flex; gap: 6px; flex-wrap: wrap;">
-          <button class="btn btn-sm" onclick="askAgentToFixForViolation('${escapeHtml(v.from_class)}', '${escapeHtml(v.to_class || '')}', event)" style="font-size: 11px; padding: 4px 10px; background: #238636; border-color: #2ea043; color: #fff;">
+          <button class="btn btn-sm" onclick="askAgentToFixForViolation(${htmlJs(v.from_class)}, ${htmlJs(v.to_class)}, event)" style="font-size: 11px; padding: 4px 10px; background: #238636; border-color: #2ea043; color: #fff;">
             🤖 Fix with AI
           </button>
-          <button class="btn btn-sm" onclick="askAgentToExplainViolation('${escapeHtml(v.from_class)}', '${escapeHtml(v.to_class || '')}', event)" style="font-size: 11px; padding: 4px 10px; background: rgba(163, 113, 247, 0.15); border-color: rgba(163, 113, 247, 0.4); color: #d2a8ff;">
+          <button class="btn btn-sm" onclick="askAgentToExplainViolation(${htmlJs(v.from_class)}, ${htmlJs(v.to_class)}, event)" style="font-size: 11px; padding: 4px 10px; background: rgba(163, 113, 247, 0.15); border-color: rgba(163, 113, 247, 0.4); color: #d2a8ff;">
             💡 Explain with AI
           </button>
           ${v.file_path ? `
-          <button class="btn btn-sm" onclick="openInEditor('${v.file_path}', ${v.line || 1}, event)" style="font-size: 11px; padding: 4px 10px; background: rgba(56, 139, 253, 0.15); border-color: rgba(56, 139, 253, 0.4); color: #58a6ff;">
+          <button class="btn btn-sm" onclick="openInEditor(${htmlJs(v.file_path)}, ${v.line || 1}, event)" style="font-size: 11px; padding: 4px 10px; background: rgba(56, 139, 253, 0.15); border-color: rgba(56, 139, 253, 0.4); color: #58a6ff;">
             ✎ Open in VS Code
           </button>` : ''}
         </div>
@@ -1128,7 +1128,7 @@ function renderNuGetList() {
       <div style="font-size: 11px; color: #8b949e; margin-top: 4px">
         Referenced by ${p.referenced_by_count} classes
       </div>
-      ${p.types.length ? `<div style="font-size: 10px; color: #c9d1d9; margin-top: 6px; font-family: monospace">Sample types: ${p.types.join(", ")}</div>` : ''}
+      ${p.types.length ? `<div style="font-size: 10px; color: #c9d1d9; margin-top: 6px; font-family: monospace">Sample types: ${p.types.map(escapeHtml).join(", ")}</div>` : ''}
     </div>
   `).join("");
 }
@@ -1271,8 +1271,12 @@ function switchTab(tabId) {
 }
 
 function escapeHtml(str) {
-  if (!str) return "";
-  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return String(str ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function htmlJs(value) {
+  return escapeHtml(JSON.stringify(value ?? ""));
 }
 
 function slugify(text) {

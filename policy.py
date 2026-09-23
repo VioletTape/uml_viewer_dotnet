@@ -187,6 +187,8 @@ class ArchitecturePolicy:
         """
         adj: Dict[str, Set[str]] = {c["id"]: set() for c in classes}
         for e in edges:
+            if e.get("is_omitted"):
+                continue
             u, v = e.get("from"), e.get("to")
             if u in adj and v in adj and u != v:
                 adj[u].add(v)

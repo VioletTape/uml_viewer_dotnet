@@ -18,12 +18,15 @@ import sys
 import threading
 import time
 import urllib.parse
+import uuid
+from pathlib import Path
 from typing import Dict, Optional, Set
 
 from extractor import CodeGraphExtractor
 from policy import ArchitecturePolicy
 from metrics import QualityMetricsEngine
 from headless_agent import HeadlessAgentWorker
+from mailbox_store import mailbox
 
 DEFAULT_PORT = 5050
 
@@ -146,6 +149,34 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
         frontend_dir = os.path.join(os.path.dirname(__file__), "frontend")
         super().__init__(*args, directory=frontend_dir, **kwargs)
 
+    def parse_request(self):
+        if not super().parse_request():
+            return False
+        port = self.server.server_port
+        suffix = f":{port}" if port != 80 else ""
+        hosts = {f"localhost{suffix}", f"127.0.0.1{suffix}"}
+        host = self.headers.get("Host", "")
+        origin = self.headers.get("Origin")
+        if (host not in hosts or
+                (origin is not None and origin != f"http://{host}") or
+                self.headers.get("Sec-Fetch-Site") == "cross-site"):
+            self.send_error(403, "Only requests from the local viewer are allowed")
+            return False
+        return True
+
+    def _source_path(self, file_path):
+        root = Path(self.project_path).resolve()
+        path = (root / file_path).resolve()
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            relative = None
+        if (relative is None or path.suffix.lower() not in {".cs", ".csx"} or
+                any(part.startswith(".") for part in relative.parts)):
+            self.send_error(403, "Only C# source files inside the project are allowed")
+            return None
+        return str(path)
+
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
@@ -167,13 +198,23 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             super().do_GET()
 
     def do_POST(self):
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            self.send_error(400, "Invalid Content-Length")
+            return
+        if not 0 <= length <= 1024 * 1024:
+            self.send_error(413, "Request body too large")
+            return
+        if length and self.headers.get_content_type() != "application/json":
+            self.send_error(415, "Expected application/json")
+            return
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/reload":
             print("[LiveSync] Manual reload triggered via POST /api/reload")
             notify_all({"type": "reload", "reason": "Manual API trigger"})
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(b'{"status": "ok", "message": "Reload event broadcasted"}\n')
         elif parsed.path == "/api/open":
@@ -204,7 +245,9 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
                 self.wfile.write(b'{"error": "Missing file_path"}\n')
                 return
 
-            abs_file = file_path if os.path.isabs(file_path) else os.path.join(self.project_path, file_path)
+            abs_file = self._source_path(file_path)
+            if abs_file is None:
+                return
             ws_root = find_workspace_root(abs_file, self.project_path)
             distro = os.environ.get("WSL_DISTRO_NAME", "Ubuntu-24.04")
             wsl_url = f"vscode://vscode-remote/wsl+{distro}{abs_file}:{line}"
@@ -213,7 +256,6 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             if not code_bin:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(json.dumps({
                     "status": "fallback",
@@ -229,7 +271,6 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps({
                 "status": "ok",
@@ -252,7 +293,6 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "keep-alive")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
 
         # Initial handshake
@@ -280,63 +320,35 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             with subscribers_lock:
                 subscribers.discard(client_queue)
 
-    def _get_mailbox_dir(self):
-        d = os.path.join(self.project_path, ".uml-viewer")
-        os.makedirs(d, exist_ok=True)
-        return d
-
     def _get_agent_tasks(self):
-        fpath = os.path.join(self._get_mailbox_dir(), "tasks.json")
-        if os.path.isfile(fpath):
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                return []
-        return []
-
-    def _save_agent_tasks(self, tasks):
-        fpath = os.path.join(self._get_mailbox_dir(), "tasks.json")
-        with open(fpath, "w", encoding="utf-8") as f:
-            json.dump(tasks, f, indent=2)
+        with mailbox(self.project_path, "tasks.json") as tasks:
+            return tasks
 
     def _get_proposals(self):
-        fpath = os.path.join(self._get_mailbox_dir(), "proposals.json")
-        if os.path.isfile(fpath):
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                return []
-        default_proposals = [{
-            "id": "prop-invert-dataprovider",
-            "name": "Simulate: Decouple DataProvider",
-            "author": "AI Copilot",
-            "description": "Simulate introducing abstractions to decouple Domain interfaces from concrete Infrastructure DataProvider.",
-            "layer_overrides": {
-                "SubmittedTriplogService": "Infrastructure"
-            },
-            "omitted_edges": [
-                {"from": "IDataProvider", "to": "DataProvider"},
-                {"from": "IDataExecutor", "to": "DataExecutor"},
-                {"from": "ILegacyDataProvider", "to": "DataProvider"}
-            ],
-            "proposed_edges": [],
-            "created_at": datetime.datetime.now().isoformat()
-        }]
-        self._save_proposals(default_proposals)
-        return default_proposals
-
-    def _save_proposals(self, proposals):
-        fpath = os.path.join(self._get_mailbox_dir(), "proposals.json")
-        with open(fpath, "w", encoding="utf-8") as f:
-            json.dump(proposals, f, indent=2)
+        with mailbox(self.project_path, "proposals.json") as proposals:
+            if not (Path(self.project_path) / ".uml-viewer" / "proposals.json").exists():
+                proposals.extend([{
+                    "id": "prop-invert-dataprovider",
+                    "name": "Simulate: Decouple DataProvider",
+                    "author": "AI Copilot",
+                    "description": "Simulate introducing abstractions to decouple Domain interfaces from concrete Infrastructure DataProvider.",
+                    "layer_overrides": {
+                        "SubmittedTriplogService": "Infrastructure"
+                    },
+                    "omitted_edges": [
+                        {"from": "IDataProvider", "to": "DataProvider"},
+                        {"from": "IDataExecutor", "to": "DataExecutor"},
+                        {"from": "ILegacyDataProvider", "to": "DataProvider"}
+                    ],
+                    "proposed_edges": [],
+                    "created_at": datetime.datetime.now().isoformat()
+                }])
+            return proposals
 
     def _handle_get_agent_tasks(self):
         tasks = self._get_agent_tasks()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(json.dumps(tasks, indent=2).encode("utf-8"))
 
@@ -347,7 +359,7 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             data = json.loads(body) if body else {}
 
             task = {
-                "id": f"task-{int(time.time()*1000)}",
+                "id": f"task-{uuid.uuid4().hex}",
                 "timestamp": datetime.datetime.now().isoformat(),
                 "op": data.get("op", "fix_violation"),
                 "title": data.get("title", "Architecture Copilot Task"),
@@ -356,9 +368,8 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
                 "status": "pending",
                 "result": None
             }
-            tasks = self._get_agent_tasks()
-            tasks.insert(0, task)
-            self._save_agent_tasks(tasks)
+            with mailbox(self.project_path, "tasks.json") as tasks:
+                tasks.insert(0, task)
 
             print(f"[Copilot] New task queued: {task['id']} - {task['title']}")
             notify_all({"type": "agent_task_queued", "task": task})
@@ -368,7 +379,6 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps({"status": "ok", "task": task}).encode("utf-8"))
         except Exception as e:
@@ -387,23 +397,21 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             status = data.get("status", "completed")
             result = data.get("result", "Task resolved by agent.")
 
-            tasks = self._get_agent_tasks()
-            found = False
-            for t in tasks:
-                if t.get("id") == task_id:
-                    t["status"] = status
-                    t["result"] = result
-                    t["resolved_at"] = datetime.datetime.now().isoformat()
-                    found = True
-                    break
+            with mailbox(self.project_path, "tasks.json") as tasks:
+                found = False
+                for t in tasks:
+                    if t.get("id") == task_id:
+                        t["status"] = status
+                        t["result"] = result
+                        t["resolved_at"] = datetime.datetime.now().isoformat()
+                        found = True
+                        break
 
             if found:
-                self._save_agent_tasks(tasks)
                 notify_all({"type": "agent_task_updated", "task_id": task_id, "status": status})
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps({"status": "ok" if found else "not_found"}).encode("utf-8"))
         except Exception as e:
@@ -416,7 +424,6 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
         proposals = self._get_proposals()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(json.dumps(proposals, indent=2).encode("utf-8"))
 
@@ -427,23 +434,21 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             prop = json.loads(body) if body else {}
 
             if not prop.get("id"):
-                prop["id"] = f"prop-{int(time.time()*1000)}"
+                prop["id"] = f"prop-{uuid.uuid4().hex}"
             if not prop.get("created_at"):
                 prop["created_at"] = datetime.datetime.now().isoformat()
 
-            proposals = self._get_proposals()
-            idx = next((i for i, p in enumerate(proposals) if p.get("id") == prop.get("id")), -1)
-            if idx >= 0:
-                proposals[idx] = prop
-            else:
-                proposals.append(prop)
+            with mailbox(self.project_path, "proposals.json") as proposals:
+                idx = next((i for i, p in enumerate(proposals) if p.get("id") == prop.get("id")), -1)
+                if idx >= 0:
+                    proposals[idx] = prop
+                else:
+                    proposals.append(prop)
 
-            self._save_proposals(proposals)
             notify_all({"type": "proposals_updated", "proposal": prop})
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps({"status": "ok", "proposal": prop}).encode("utf-8"))
         except Exception as e:
@@ -451,6 +456,11 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+
+    def _load_policy(self):
+        if self.policy_path and os.path.isfile(self.policy_path):
+            return ArchitecturePolicy.load_from_file(self.policy_path)
+        return ArchitecturePolicy()
 
     def _handle_get_graph(self, query=None):
         try:
@@ -463,10 +473,7 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             ext = CodeGraphExtractor(self.project_path, prefix=self.prefix)
             raw_graph = ext.extract()
 
-            if self.policy_path and os.path.isfile(self.policy_path):
-                policy = ArchitecturePolicy.load_from_file(self.policy_path)
-            else:
-                policy = ArchitecturePolicy()
+            policy = self._load_policy()
 
             evaluated = policy.evaluate_graph(raw_graph, proposal=selected_proposal)
 
@@ -475,7 +482,6 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps(enriched, indent=2).encode("utf-8"))
         except Exception as e:
@@ -488,12 +494,11 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
         try:
             ext = CodeGraphExtractor(self.project_path, prefix=self.prefix)
             raw_graph = ext.extract()
-            policy = ArchitecturePolicy()
+            policy = self._load_policy()
             evaluated = policy.evaluate_graph(raw_graph)
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps(evaluated.get("violations", []), indent=2).encode("utf-8"))
         except Exception as e:
@@ -509,7 +514,9 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             return
 
-        abs_path = file_param if os.path.isabs(file_param) else os.path.join(self.project_path, file_param)
+        abs_path = self._source_path(file_param)
+        if abs_path is None:
+            return
 
         if not os.path.isfile(abs_path):
             self.send_response(404)
@@ -524,7 +531,6 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(json.dumps({
                 "path": abs_path,
@@ -623,7 +629,7 @@ def run_server(project_path: str, prefix: str = "", policy_path: str = "", port:
     sys.stdout.flush()
 
     http.server.ThreadingHTTPServer.allow_reuse_address = True
-    with http.server.ThreadingHTTPServer(("", port), ArchitectureHandler) as httpd:
+    with http.server.ThreadingHTTPServer(("127.0.0.1", port), ArchitectureHandler) as httpd:
         def shutdown_sig(sig, frame):
             nonlocal httpd
             global server_stopping

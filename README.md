@@ -4,6 +4,13 @@ A fast, interactive architecture radar, code-coverage quality engine, and autono
 
 Eliminates the Java 21 / Quil / Processing / Swing / tmux dependencies of the original prototype, replacing them with a local REST backend, headless AI daemon, and an interactive SVG/HTML5 web UI.
 
+The server listens only on `127.0.0.1`. Use `http://localhost:5050` or
+`http://127.0.0.1:5050` (or your configured port). Browser requests must come
+from the viewer's own origin; local CLI requests can omit `Origin`. File reads
+and editor actions accept only `.cs` and `.csx` files inside the project,
+including after resolving symlinks. Mailbox locking and daemon identification
+use Linux/WSL facilities.
+
 ---
 
 ## 🚀 Global CLI: `uml`
@@ -65,3 +72,6 @@ uml stop
 - `GET /api/agent/tasks` & `POST /api/agent/tasks`: Queue and retrieve background AI agent tasks.
 - `GET /api/agent/proposals`: Retrieve stored What-If simulation proposals.
 - `POST /api/open`: Launches local VS Code to file path and line.
+
+Run regression checks with `python3 -m unittest discover -v` and
+`node test_frontend.js`.

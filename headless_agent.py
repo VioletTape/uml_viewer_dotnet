@@ -6,13 +6,14 @@ executes architectural analysis, generates What-If refactoring proposals, and re
 """
 
 import datetime
-import json
 import os
 import re
 import sys
 import threading
 import time
 from typing import Callable, Dict, List, Optional
+
+from mailbox_store import mailbox
 
 
 def slugify(text: str) -> str:
@@ -47,34 +48,8 @@ class HeadlessAgentWorker:
         self._wake_event.set()
 
     def _get_tasks(self) -> List[Dict]:
-        fpath = os.path.join(self.mailbox_dir, "tasks.json")
-        if os.path.isfile(fpath):
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                return []
-        return []
-
-    def _save_tasks(self, tasks: List[Dict]):
-        fpath = os.path.join(self.mailbox_dir, "tasks.json")
-        with open(fpath, "w", encoding="utf-8") as f:
-            json.dump(tasks, f, indent=2)
-
-    def _get_proposals(self) -> List[Dict]:
-        fpath = os.path.join(self.mailbox_dir, "proposals.json")
-        if os.path.isfile(fpath):
-            try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except Exception:
-                return []
-        return []
-
-    def _save_proposals(self, proposals: List[Dict]):
-        fpath = os.path.join(self.mailbox_dir, "proposals.json")
-        with open(fpath, "w", encoding="utf-8") as f:
-            json.dump(proposals, f, indent=2)
+        with mailbox(self.project_path, "tasks.json") as tasks:
+            return tasks
 
     def _emit(self, event_data: dict):
         if self.notify_cb:
@@ -104,14 +79,13 @@ class HeadlessAgentWorker:
             self._process_single_task(task["id"])
 
     def _process_single_task(self, task_id: str):
-        tasks = self._get_tasks()
-        task = next((t for t in tasks if t["id"] == task_id), None)
-        if not task or task.get("status") != "pending":
-            return
+        with mailbox(self.project_path, "tasks.json") as tasks:
+            task = next((t for t in tasks if t["id"] == task_id), None)
+            if not task or task.get("status") != "pending":
+                return
 
-        # 1. Transition to in_progress
-        task["status"] = "in_progress"
-        self._save_tasks(tasks)
+            # 1. Transition to in_progress
+            task["status"] = "in_progress"
         print(f"[Headless Agent] ⚡ Picked up task {task_id}: '{task.get('title')}'")
         self._emit({"type": "agent_task_updated", "task_id": task_id, "status": "in_progress"})
 
@@ -137,13 +111,15 @@ class HeadlessAgentWorker:
             print(f"[Headless Agent] ❌ Task {task_id} failed: {e}", file=sys.stderr)
 
         # 3. Mark completed
-        tasks = self._get_tasks()
-        task = next((t for t in tasks if t["id"] == task_id), None)
-        if task:
-            task["status"] = "completed"
-            task["result"] = result_message
-            task["resolved_at"] = datetime.datetime.now().isoformat()
-            self._save_tasks(tasks)
+        completed = False
+        with mailbox(self.project_path, "tasks.json") as tasks:
+            task = next((t for t in tasks if t["id"] == task_id), None)
+            if task and task.get("status") == "in_progress":
+                task["status"] = "completed"
+                task["result"] = result_message
+                task["resolved_at"] = datetime.datetime.now().isoformat()
+                completed = True
+        if completed:
             print(f"[Headless Agent] ✅ Completed task {task_id}: {result_message[:70]}...")
             self._emit({"type": "agent_task_updated", "task_id": task_id, "status": "completed"})
 
@@ -156,9 +132,6 @@ class HeadlessAgentWorker:
 
         prop_id = f"prop-fix-{slugify(from_cls)}-{slugify(to_cls)}"
         prop_name = f"DIP: Decouple {from_cls} from {to_cls}"
-
-        proposals = self._get_proposals()
-        existing = next((p for p in proposals if p["id"] == prop_id), None)
 
         layer_overrides = {}
         omitted = [{"from": from_cls, "to": to_cls}]
@@ -179,19 +152,14 @@ class HeadlessAgentWorker:
             "created_at": datetime.datetime.now().isoformat()
         }
 
-        if existing:
-            proposals = [new_proposal if p["id"] == prop_id else p for p in proposals]
-        else:
+        with mailbox(self.project_path, "proposals.json") as proposals:
+            proposals[:] = [p for p in proposals if p["id"] != prop_id]
             proposals.insert(0, new_proposal)
-
-        self._save_proposals(proposals)
         self._emit({"type": "proposals_updated"})
 
         return f"Created What-If proposal '{prop_name}'. Decoupled direct dependency and proposed interface I{to_cls}Port in Contracts."
 
     def _handle_propose_refactor(self, task: Dict) -> str:
-        # Load proposals
-        proposals = self._get_proposals()
         prop_id = "prop-headless-full-decoupling"
         prop_name = "Autonomous: Full Architecture Decoupling"
 
@@ -233,9 +201,9 @@ class HeadlessAgentWorker:
             "created_at": datetime.datetime.now().isoformat()
         }
 
-        proposals = [p for p in proposals if p["id"] != prop_id]
-        proposals.insert(0, new_proposal)
-        self._save_proposals(proposals)
+        with mailbox(self.project_path, "proposals.json") as proposals:
+            proposals[:] = [p for p in proposals if p["id"] != prop_id]
+            proposals.insert(0, new_proposal)
         self._emit({"type": "proposals_updated"})
 
         return f"Autonomous agent generated What-If proposal '{prop_name}'. Relocated Value Objects to Domain and isolated Infrastructure DataProviders behind Contracts."
