@@ -239,8 +239,7 @@ body {
   justify-content: space-between;
   align-items: center;
   border-bottom: 1px solid var(--border);
-  position: sticky;
-  top: 0;
+  position: relative;
   z-index: 2;
   border-top-left-radius: 10px;
   border-top-right-radius: 10px;
@@ -516,12 +515,16 @@ path.edge-line.highlight {
   font-size: 11px;
   margin: 6px 0;
   color: var(--text-main);
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .viol-reason {
   font-size: 11px;
   color: var(--text-muted);
   line-height: 1.35;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .viol-loc {
@@ -529,6 +532,12 @@ path.edge-line.highlight {
   font-size: 10px;
   color: var(--accent-blue);
   text-decoration: underline;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  display: block;
+  max-width: 100%;
+  line-height: 1.4;
 }
 
 /* Inspector Details */
@@ -765,6 +774,10 @@ path.edge-line.highlight {
   padding: 12px;
   margin-bottom: 12px;
   transition: all 0.2s;
+  box-sizing: border-box;
+  max-width: 100%;
+  overflow: hidden;
+  word-break: break-word;
 }
 
 .inspect-violation-card.active-highlight {

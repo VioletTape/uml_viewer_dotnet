@@ -669,8 +669,8 @@ function selectClass(cls, activeViolation = null) {
                 <div class="viol-path" style="margin: 6px 0; font-size: 11px;">
                   <strong>${escapeHtml(v.from_class)}</strong> (${v.from_layer || 'None'}) &rarr; <strong>${escapeHtml(v.to_class || 'None')}</strong> (${v.to_layer || 'None'})
                 </div>
-                <div class="viol-reason" style="font-size: 11px; margin-bottom: 6px;">${escapeHtml(v.reason)}</div>
-                ${v.file_path ? `<div class="viol-loc" style="font-size: 10px; margin-bottom: 8px;">📍 ${escapeHtml(v.file_path)}:${v.line || 1}</div>` : ''}
+                <div class="viol-reason" style="font-size: 11px; margin-bottom: 6px; word-break: break-word; overflow-wrap: anywhere;">${escapeHtml(v.reason)}</div>
+                ${v.file_path ? `<div class="viol-loc" style="font-size: 10px; margin-bottom: 8px; word-break: break-all; overflow-wrap: anywhere; line-height: 1.4;">📍 ${escapeHtml(v.file_path)}:${v.line || 1}</div>` : ''}
                 
                 <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px;">
                   <button class="btn btn-sm" onclick="askAgentToFixForViolation('${escapeHtml(v.from_class)}', '${escapeHtml(v.to_class || '')}', event)" style="font-size: 11px; padding: 3px 10px; background: #238636; border-color: #2ea043; color: #fff;" title="Autonomous AI Agent generates What-If DIP decoupling proposal">
@@ -763,6 +763,9 @@ function selectClass(cls, activeViolation = null) {
     const cardEl = document.getElementById(`inspect-viol-${violSlug}`);
     if (cardEl) {
       cardEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      const vp = document.getElementById("viewport");
+      if (vp) { vp.scrollTop = 0; vp.scrollLeft = 0; }
+      window.scrollTo(0, 0);
     }
   }
 }
@@ -911,7 +914,7 @@ function inspectViolation(violationIndex) {
         collapsedNamespaces.delete(group.dataset.nsid);
         drawEdges();
       }
-      card.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+      centerOnElement(card);
     }
     selectClass(cls, v);
   } else {
@@ -944,11 +947,11 @@ function renderStandaloneViolationInspector(v) {
         <div class="viol-title" style="display: flex; justify-content: space-between; align-items: center;">
           <span style="color: ${catColor}; font-weight: 700; font-size: 11px;">⚠ ${catBadge}</span>
         </div>
-        <div class="viol-path" style="margin: 6px 0; font-size: 11px;">
+        <div class="viol-path" style="margin: 6px 0; font-size: 11px; word-break: break-word; overflow-wrap: anywhere;">
           <strong>${escapeHtml(v.from_class)}</strong> (${v.from_layer || 'None'}) &rarr; <strong>${escapeHtml(v.to_class || 'None')}</strong> (${v.to_layer || 'None'})
         </div>
-        <div class="viol-reason" style="font-size: 11px; margin-bottom: 6px;">${escapeHtml(v.reason)}</div>
-        ${v.file_path ? `<div class="viol-loc" style="font-size: 10px; margin-bottom: 8px;">📍 ${escapeHtml(v.file_path)}:${v.line || 1}</div>` : ''}
+        <div class="viol-reason" style="font-size: 11px; margin-bottom: 6px; word-break: break-word; overflow-wrap: anywhere;">${escapeHtml(v.reason)}</div>
+        ${v.file_path ? `<div class="viol-loc" style="font-size: 10px; margin-bottom: 8px; word-break: break-all; overflow-wrap: anywhere; line-height: 1.4;">📍 ${escapeHtml(v.file_path)}:${v.line || 1}</div>` : ''}
 
         <div style="display: flex; gap: 6px; flex-wrap: wrap;">
           <button class="btn btn-sm" onclick="askAgentToFixForViolation('${escapeHtml(v.from_class)}', '${escapeHtml(v.to_class || '')}', event)" style="font-size: 11px; padding: 4px 10px; background: #238636; border-color: #2ea043; color: #fff;">
@@ -1077,9 +1080,37 @@ function focusViolation(className) {
       collapsedNamespaces.delete(group.dataset.nsid);
       drawEdges();
     }
-    card.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+    centerOnElement(card);
     card.click();
   }
+}
+
+function centerOnElement(el) {
+  if (!el) return;
+  const vp = document.getElementById("viewport");
+  if (!vp) return;
+
+  // Reset any browser native scroll so sticky or transformed elements never get displaced
+  vp.scrollTop = 0;
+  vp.scrollLeft = 0;
+  window.scrollTo(0, 0);
+
+  const elRect = el.getBoundingClientRect();
+  const vpRect = vp.getBoundingClientRect();
+
+  // Find centers in viewport screen coordinates
+  const elCenterX = elRect.left + elRect.width / 2;
+  const elCenterY = elRect.top + elRect.height / 2;
+
+  const vpCenterX = vpRect.left + vpRect.width / 2;
+  const vpCenterY = vpRect.top + vpRect.height / 2;
+
+  // Delta to center el in viewport
+  panX += (vpCenterX - elCenterX);
+  panY += (vpCenterY - elCenterY);
+
+  updateTransform();
+  drawEdges();
 }
 
 function renderNuGetList() {
@@ -1104,6 +1135,11 @@ function renderNuGetList() {
 
 function setupPanZoom() {
   updateTransform();
+
+  viewport.addEventListener("scroll", () => {
+    viewport.scrollTop = 0;
+    viewport.scrollLeft = 0;
+  });
 
   viewport.addEventListener("mousedown", e => {
     if (e.target.closest(".class-card") || e.target.closest(".ns-header") || e.target.closest("button")) return;
