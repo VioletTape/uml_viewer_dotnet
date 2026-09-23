@@ -61,6 +61,10 @@ uml stop
 - **Deep Inspector**:
   - Focuses selected classes with geometric auto-centering.
   - Interactive Clean Architecture violation cards with `🤖 Fix with AI`, `💡 Explain with AI`, and `✎ Open in VS Code`.
+- **Namespace Drill-Down**: Open namespace cards to reveal child namespaces and
+  classes. Breadcrumbs, **Up**, and **Esc** navigate back. Dependencies are
+  bundled between groups; connected namespaces outside the current scope remain
+  visible as dashed cards. Selecting a violation opens its class's namespace.
 - **VS Code Deep-Linking**: One-click jump to file and line in VS Code inside WSL.
 
 ---

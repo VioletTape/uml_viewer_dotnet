@@ -7,7 +7,7 @@ const elements = [];
 const byId = new Map();
 function element() {
   const e = { innerHTML: "", dataset: {}, classList: { add() {}, remove() {} },
-    appendChild() {}, addEventListener() {} };
+    appendChild() {}, addEventListener() {}, setAttribute() {}, replaceChildren() {} };
   elements.push(e);
   return e;
 }
@@ -60,3 +60,41 @@ assert.equal(context.injected, undefined);
 
 vm.runInContext(`graphData.classes[0].layer = '__proto__'; renderLayers()`, context);
 console.log("Frontend regression checks passed: escaped HTML, quoted paths, and layer names.");
+
+// Nested namespaces collapse into cards, with cross-boundary dependencies kept.
+const graph = {
+  classes: [
+    {id: 'a', name: 'A', namespace: 'App.Domain', layer: 'Domain'},
+    {id: 'b', name: 'B', namespace: 'App.Domain.Services', layer: 'Domain'},
+    {id: 'c', name: 'C', namespace: 'App.Domain.Services', layer: 'Domain'},
+    {id: 'd', name: 'D', namespace: 'App.Infrastructure', layer: 'Infrastructure'},
+    {id: 'e', name: 'E', namespace: 'App.DomainExtra', layer: 'Domain'},
+  ],
+  edges: [
+    {from: 'b', to: 'd', kind: 'dependency'},
+    {from: 'c', to: 'd', kind: 'dependency', violating: true},
+    {from: 'a', to: 'b', kind: 'dependency'},
+    {from: 'b', to: 'd', kind: 'dependency', is_omitted: true},
+  ],
+  violations: [{from_namespace: 'App.Domain.Services', from_class: 'C'}],
+};
+assert.equal(context.namespaceRoot(graph.classes), 'App');
+assert.equal(context.inNamespace('App.DomainExtra', 'App.Domain'), false);
+const overview = context.buildNamespaceView(graph, 'App');
+assert.equal(overview.classes.length, 3);
+const domain = overview.classes.find(c => c.child_namespace === 'App.Domain');
+assert.equal(domain.class_count, 3);
+assert.equal(domain.has_violations, true);
+assert.equal(overview.edges.length, 2); // Omitted and real edges remain separate.
+assert.equal(overview.edges.find(e => !e.is_omitted).count, 2);
+assert.equal(overview.edges.find(e => !e.is_omitted).violating, true);
+const nested = context.buildNamespaceView(graph, 'App.Domain');
+assert(nested.classes.some(c => c.id === 'a'));
+assert(nested.classes.some(c => c.child_namespace === 'App.Domain.Services'));
+assert(nested.classes.some(c => c.child_namespace === 'App.Infrastructure' && c.external));
+assert(!nested.classes.some(c => c.child_namespace === 'App.DomainExtra'));
+const leaf = context.buildNamespaceView(graph, 'App.Domain.Services');
+assert(leaf.classes.some(c => c.id === 'b') && leaf.classes.some(c => c.id === 'c'));
+assert.equal(context.buildNamespaceView({classes: [], edges: []}, '').classes.length, 0);
+assert.equal(context.namespaceRoot([{namespace: ''}, {namespace: 'App'}]), '');
+console.log("Namespace regression checks passed: grouping, drill-down, boundaries, and bundled edges.");

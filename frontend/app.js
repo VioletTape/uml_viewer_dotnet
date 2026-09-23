@@ -8,6 +8,8 @@ let showCrapOverlay = false;
 let selectedClassId = null;
 let hoveredClassId = null;
 const collapsedNamespaces = new Set();
+let namespacePath = null;
+let diagramData = null;
 
 // Pan & Zoom state
 let scale = 1.0;
@@ -275,9 +277,113 @@ function renderAll() {
   setTimeout(drawEdges, 60);
 }
 
+function inNamespace(namespace, parent) {
+  return !parent || namespace === parent || namespace.startsWith(parent + ".");
+}
+
+function namespaceRoot(classes) {
+  const parts = (classes[0]?.namespace || "").split(".").filter(Boolean);
+  while (parts.length && !classes.every(c => inNamespace(c.namespace || "", parts.join(".")))) parts.pop();
+  return parts.join(".");
+}
+
+function buildNamespaceView(graph, scope) {
+  const classes = graph.classes || [];
+  const inside = new Set(classes.filter(c => inNamespace(c.namespace || "", scope)).map(c => c.id));
+  const relevantEdges = (graph.edges || []).filter(e => inside.has(e.from) || inside.has(e.to));
+  const visible = new Set(inside);
+  relevantEdges.forEach(e => { visible.add(e.from); visible.add(e.to); });
+  const nodes = new Map();
+  const endpoints = new Map();
+  const violating = new Set((graph.violations || []).map(v => JSON.stringify([v.from_namespace, v.from_class])));
+  for (const cls of classes) {
+    if (!visible.has(cls.id)) continue;
+    const ns = cls.namespace || "";
+    if (inside.has(cls.id) && ns === scope) {
+      nodes.set(cls.id, cls);
+      endpoints.set(cls.id, cls.id);
+      continue;
+    }
+    const external = !inside.has(cls.id);
+    const child = external ? ns : (scope ? scope + "." : "") + ns.slice(scope ? scope.length + 1 : 0).split(".")[0];
+    const id = `namespace:${JSON.stringify([cls.layer, child])}`;
+    if (!nodes.has(id)) nodes.set(id, {
+      id, name: external ? (child || "(Root)") : child.split(".").at(-1),
+      namespace: external ? "Outside this namespace" : scope,
+      layer: cls.layer, is_namespace: true, child_namespace: child, external,
+      class_count: 0, complexity: 0, crap: 0, risk: "green", members: [],
+    });
+    const node = nodes.get(id);
+    node.class_count++;
+    node.complexity += cls.complexity || 0;
+    if ((cls.crap || 0) > node.crap) { node.crap = cls.crap; node.risk = cls.risk || "green"; }
+    node.has_violations ||= violating.has(JSON.stringify([cls.namespace, cls.name]));
+    endpoints.set(cls.id, id);
+  }
+  const edges = new Map();
+  for (const edge of relevantEdges) {
+    const from = endpoints.get(edge.from), to = endpoints.get(edge.to);
+    if (!from || !to || from === to) continue;
+    const key = JSON.stringify([from, to, edge.kind, !!edge.is_omitted, !!edge.is_proposed]);
+    if (!edges.has(key)) edges.set(key, {...edge, from, to,
+      from_class: nodes.get(from).name, to_class: nodes.get(to).name, count: 0, summary: ""});
+    const bundled = edges.get(key);
+    bundled.count++;
+    bundled.violating ||= edge.violating;
+    bundled.is_cycle ||= edge.is_cycle;
+    bundled.summary += `${edge.from_class || edge.from} → ${edge.to_class || edge.to}${edge.violating || edge.is_cycle ? ' (violation)' : ''}\n`;
+  }
+  return {classes: [...nodes.values()], edges: [...edges.values()]};
+}
+
+function navigateNamespace(path) {
+  namespacePath = path;
+  selectedClassId = hoveredClassId = null;
+  collapsedNamespaces.clear();
+  scale = 1;
+  panX = panY = 40;
+  renderLayers();
+  updateTransform();
+  drawEdges();
+  document.getElementById("inspect-title").textContent = "Select a Class";
+  document.getElementById("inspect-subtitle").textContent = namespacePath || "All namespaces";
+  document.getElementById("inspect-details").innerHTML = '<div class="empty-state">Open a namespace, then select a class to inspect its members.</div>';
+}
+
+function renderNamespaceNavigation(root) {
+  const nav = document.getElementById("namespace-navigation");
+  if (!nav) return;
+  nav.replaceChildren();
+  const add = (label, path, current = false) => {
+    const button = document.createElement("button");
+    button.className = "btn btn-sm";
+    button.textContent = label;
+    if (current) button.setAttribute("aria-current", "page");
+    button.addEventListener("click", () => navigateNamespace(path));
+    nav.appendChild(button);
+  };
+  if (namespacePath !== root) {
+    const parent = namespacePath.split(".").slice(0, -1).join(".");
+    add("← Up", inNamespace(parent, root) ? parent : root);
+  }
+  add("All namespaces", root, namespacePath === root);
+  const parts = namespacePath ? namespacePath.split(".") : [];
+  for (let i = root ? root.split(".").length : 0; i < parts.length; i++) {
+    add(parts[i], parts.slice(0, i + 1).join("."), i === parts.length - 1);
+  }
+  nav.title = namespacePath || "All namespaces";
+}
+
 function renderLayers() {
   layersContainer.innerHTML = "";
-  const classes = graphData.classes || [];
+  const root = namespaceRoot(graphData.classes || []);
+  if (namespacePath === null || !inNamespace(namespacePath, root) ||
+      !graphData.classes.some(c => inNamespace(c.namespace || "", namespacePath))) {
+    namespacePath = root;
+  }
+  diagramData = buildNamespaceView(graphData, namespacePath);
+  renderNamespaceNavigation(root);
+  const classes = diagramData.classes;
 
   // Group classes by layer, then by namespace
   const layerGroups = Object.create(null);
@@ -299,7 +405,7 @@ function renderLayers() {
   });
 
   const violations = graphData.violations || [];
-  const violatingClassNames = new Set(violations.map(v => v.from_class));
+  const violatingClasses = new Set(violations.map(v => JSON.stringify([v.from_namespace, v.from_class])));
 
   sortedLayers.forEach(layerName => {
     const column = document.createElement("div");
@@ -307,7 +413,7 @@ function renderLayers() {
 
     const nsMap = layerGroups[layerName];
     let totalClassesInLayer = 0;
-    Object.values(nsMap).forEach(arr => totalClassesInLayer += arr.length);
+    Object.values(nsMap).forEach(arr => totalClassesInLayer += arr.reduce((sum, c) => sum + (c.class_count || 1), 0));
 
     const header = document.createElement("div");
     header.className = "layer-header";
@@ -365,8 +471,15 @@ function renderLayers() {
         card.className = "class-card";
         card.id = `card-${cls.id}`;
         card.dataset.id = cls.id;
+        card.tabIndex = 0;
+        card.setAttribute("role", "button");
+        if (cls.is_namespace) {
+          card.classList.add("namespace-card");
+          if (cls.external) card.classList.add("external");
+          card.title = `Open namespace ${cls.child_namespace}`;
+        }
 
-        if (violatingClassNames.has(cls.name)) {
+        if (cls.has_violations || (!cls.is_namespace && violatingClasses.has(JSON.stringify([cls.namespace, cls.name])))) {
           card.classList.add("has-violation");
         }
 
@@ -388,14 +501,14 @@ function renderLayers() {
               ${proposedBadge}
             </div>
             <div style="display: flex; align-items: center; gap: 5px;">
-              <span class="crap-pill ${risk}">CRAP ${crap}</span>
+              <span class="crap-pill ${risk}">${cls.is_namespace ? 'Max ' : ''}CRAP ${crap}</span>
               <span class="risk-dot ${risk}" title="Risk: ${risk} (CRAP ${crap})"></span>
               <span style="font-size: 10px; color: #8b949e">${escapeHtml(cls.visibility)}</span>
             </div>
           </div>
-          <div class="card-name">${escapeHtml(cls.name)}</div>
+          <div class="card-name">${cls.is_namespace ? '📁 ' : ''}${escapeHtml(cls.name)}</div>
           <div class="card-stats">
-            <span>⚙ ${cls.members.length} members</span>
+            <span>${cls.is_namespace ? `${cls.class_count} ${cls.external ? 'linked classes · outside scope' : 'classes · open namespace →'}` : `⚙ ${cls.members.length} members`}</span>
             <span>⚡ Comp ${cls.complexity || 0}</span>
             ${cls.coverage_pct ? `<span>🛡 ${cls.coverage_pct}% cov</span>` : ''}
           </div>
@@ -403,11 +516,19 @@ function renderLayers() {
 
         card.addEventListener("click", (e) => {
           e.stopPropagation();
-          selectClass(cls);
+          if (cls.is_namespace) navigateNamespace(cls.child_namespace);
+          else selectClass(cls);
+        });
+        card.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            card.click();
+          }
         });
 
         card.addEventListener("mouseenter", () => {
           hoveredClassId = cls.id;
+          if (displayMode === "focus") drawEdges();
           if (displayMode === "focus" || displayMode === "all") {
             highlightClassEdges(cls.id);
           }
@@ -415,6 +536,7 @@ function renderLayers() {
 
         card.addEventListener("mouseleave", () => {
           hoveredClassId = null;
+          if (displayMode === "focus") drawEdges();
           if (displayMode === "focus" || displayMode === "all") {
             resetEdgeHighlights();
           }
@@ -464,15 +586,15 @@ function drawEdges() {
 
   if (!graphData) return;
 
-  const edges = graphData.edges || [];
+  const edges = (diagramData || graphData).edges || [];
   const focusId = hoveredClassId || selectedClassId;
 
   edges.forEach(e => {
     // Mode filtering
-    if (displayMode === "violations" && !e.violating) {
+    if (displayMode === "violations" && !e.violating && !e.is_cycle) {
       return;
     }
-    if (displayMode === "focus" && !e.violating) {
+    if (displayMode === "focus" && !e.violating && !e.is_cycle) {
       if (e.from !== focusId && e.to !== focusId) {
         return;
       }
@@ -531,7 +653,7 @@ function drawEdges() {
       path.dataset.from = e.from;
       path.dataset.to = e.to;
       const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-      title.textContent = `SIMULATED RESOLUTION: Decoupled ${e.from_class} -> ${e.to_class}`;
+      title.textContent = `SIMULATED RESOLUTION: ${e.summary || `${e.from_class} → ${e.to_class}`}`;
       path.appendChild(title);
       svgEdges.appendChild(path);
       return;
@@ -546,7 +668,7 @@ function drawEdges() {
       path.dataset.from = e.from;
       path.dataset.to = e.to;
       const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-      title.textContent = `PROPOSED INTERFACE: ${e.from_class} -> ${e.to_class}`;
+      title.textContent = `PROPOSED: ${e.summary || `${e.from_class} → ${e.to_class}`}`;
       path.appendChild(title);
       svgEdges.appendChild(path);
       return;
@@ -554,17 +676,20 @@ function drawEdges() {
 
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("d", pathD);
-    path.setAttribute("class", `edge-line ${e.violating ? "violating" : ""}`);
+    path.setAttribute("class", `edge-line ${e.violating || e.is_cycle ? "violating" : ""}`);
     path.dataset.from = e.from;
     path.dataset.to = e.to;
 
-    if (e.violating) {
+    if (e.violating || e.is_cycle) {
       path.setAttribute("marker-end", "url(#arrow-viol)");
       const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-      title.textContent = `VIOLATION: ${e.violation_reason}`;
+      title.textContent = e.summary || `VIOLATION: ${e.violation_reason}`;
       path.appendChild(title);
     } else {
       path.setAttribute("marker-end", "url(#arrow-default)");
+      const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+      title.textContent = e.summary || `${e.from_class} → ${e.to_class}`;
+      path.appendChild(title);
     }
 
     svgEdges.appendChild(path);
@@ -904,8 +1029,9 @@ function inspectViolation(violationIndex) {
   const v = (graphData.violations || [])[violationIndex];
   if (!v) return;
 
-  const cls = (graphData.classes || []).find(c => c.name === v.from_class);
+  const cls = (graphData.classes || []).find(c => c.name === v.from_class && c.namespace === v.from_namespace);
   if (cls) {
+    navigateNamespace(cls.namespace || "");
     const card = document.getElementById(`card-${cls.id}`);
     if (card) {
       const group = card.closest(".ns-group.collapsed");
@@ -1069,6 +1195,8 @@ async function askAgentToExplainViolation(fromClass, toClass, event) {
 }
 
 function focusViolation(className) {
+  const cls = (graphData.classes || []).find(c => c.name === className);
+  if (cls) navigateNamespace(cls.namespace || "");
   const card = Array.from(document.querySelectorAll(".class-card"))
     .find(c => c.querySelector(".card-name").textContent === className);
 
@@ -1285,3 +1413,11 @@ function slugify(text) {
 
 window.addEventListener("DOMContentLoaded", init);
 window.addEventListener("resize", drawEdges);
+window.addEventListener("keydown", e => {
+  if (e.key !== "Escape" || e.target.closest("input, textarea, select")) return;
+  const root = namespaceRoot(graphData?.classes || []);
+  if (namespacePath && namespacePath !== root) {
+    const parent = namespacePath.split(".").slice(0, -1).join(".");
+    navigateNamespace(inNamespace(parent, root) ? parent : root);
+  }
+});
