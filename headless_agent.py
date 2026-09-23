@@ -126,6 +126,8 @@ class HeadlessAgentWorker:
                 result_message = self._handle_propose_refactor(task)
             elif op == "fix_violation":
                 result_message = self._handle_fix_violation(task)
+            elif op == "explain_violation":
+                result_message = self._handle_explain_violation(task)
             elif op == "refresh_crap":
                 result_message = self._handle_refresh_crap(task)
             else:
@@ -237,6 +239,49 @@ class HeadlessAgentWorker:
         self._emit({"type": "proposals_updated"})
 
         return f"Autonomous agent generated What-If proposal '{prop_name}'. Relocated Value Objects to Domain and isolated Infrastructure DataProviders behind Contracts."
+
+    def _handle_explain_violation(self, task: Dict) -> str:
+        target = task.get("target", {})
+        from_cls = target.get("from_class", "Source")
+        to_cls = target.get("to_class", "Target")
+        from_layer = target.get("from_layer", "Application")
+        to_layer = target.get("to_layer", "Infrastructure")
+        cat = target.get("category", "dependency_rule")
+        reason = target.get("reason", "")
+
+        if cat == "cycle":
+            return (
+                f"### Circular Dependency (ADP Violation)\n\n"
+                f"**Path**: `{from_cls}` and `{to_cls}` participate in a mutual dependency cycle.\n\n"
+                f"**Why this is harmful**: Circular dependencies couple classes into a single monolithic unit. "
+                f"Neither can be independently tested, compiled, or reused without the other.\n\n"
+                f"**Recommended Refactoring**:\n"
+                f"1. **Dependency Inversion (DIP)**: Extract an interface in `Contracts` so one party depends only on the abstraction.\n"
+                f"2. **Introduce an Orchestrator**: Move shared coordination into an Application service or mediator."
+            )
+        elif cat == "framework_taint":
+            return (
+                f"### Framework Isolation Violation\n\n"
+                f"**Class**: `{from_cls}` ({from_layer}) directly references external framework package `{to_cls}`.\n\n"
+                f"**Why this is harmful**: Clean Architecture dictates that core domain entities and use-cases remain framework-agnostic POCO code. "
+                f"Coupling domain logic to external ORM, HTTP, or transport frameworks binds your business rules to third-party vendor volatility.\n\n"
+                f"**Recommended Refactoring**:\n"
+                f"1. Remove the direct NuGet reference from the Domain project.\n"
+                f"2. Move framework attributes, DB contexts, or serialization logic into Infrastructure repository adapters."
+            )
+        else:
+            return (
+                f"### Dependency Rule Violation\n\n"
+                f"**Violation**: `{from_cls}` (layer **{from_layer}**) directly depends on `{to_cls}` (layer **{to_layer}**).\n\n"
+                f"**Rule**: *Source code dependencies must point only inward, toward higher-level policies.*\n"
+                f"Here, `{from_layer}` is an inner policy layer, while `{to_layer}` is an outer detail layer.\n\n"
+                f"**Why this is harmful**: When core business logic directly calls concrete infrastructure (databases, GRPC/HTTP clients, or cloud SDKs), you cannot test business logic in isolation without mocking volatile third-party systems.\n\n"
+                f"**Recommended Refactoring**:\n"
+                f"1. **Define a Port**: Create an interface (e.g. `I{to_cls}Port` or `I{to_cls}Repository`) inside `{from_layer}` or `Contracts`.\n"
+                f"2. **Inject Abstraction**: Have `{from_cls}` accept this interface via constructor dependency injection.\n"
+                f"3. **Implement Adapter**: In `{to_layer}`, have `{to_cls}` implement the interface.\n"
+                f"4. **Register**: Bind them in the DI container (`Program.cs`)."
+            )
 
     def _handle_refresh_crap(self, task: Dict) -> str:
         self._emit({"type": "reload", "reason": "Headless agent requested metrics re-scan"})

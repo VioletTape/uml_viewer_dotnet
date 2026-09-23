@@ -600,7 +600,7 @@ function resetEdgeHighlights() {
   });
 }
 
-function selectClass(cls) {
+function selectClass(cls, activeViolation = null) {
   selectedClassId = cls.id;
   document.querySelectorAll(".class-card").forEach(c => c.classList.remove("selected"));
   const card = document.getElementById(`card-${cls.id}`);
@@ -620,11 +620,85 @@ function selectClass(cls) {
   inspectTitle.textContent = cls.name;
   inspectSub.textContent = cls.namespace;
 
-  const vscodeUri = `vscode://file${cls.file_path.startsWith('/') ? '' : '/'}${cls.file_path}:${cls.start_line || 1}`;
   const riskClass = cls.risk || "green";
   const crapScore = cls.crap || 1;
   const comp = cls.complexity || 0;
   const cov = cls.coverage_pct || 0;
+
+  // 1. Gather all violations involving this class
+  const classViolations = (graphData.violations || []).filter(
+    v => v.from_class === cls.name || v.to_class === cls.name
+  );
+
+  let violationsHtml = "";
+  if (classViolations.length > 0) {
+    violationsHtml = `
+      <div class="inspect-section">
+        <h4 style="color: #ff7b72; display: flex; justify-content: space-between; align-items: center; border-color: rgba(248, 81, 73, 0.4);">
+          <span>⚠ Clean Architecture Violations (${classViolations.length})</span>
+        </h4>
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          ${classViolations.map((v) => {
+            const isHighlighted = activeViolation && (
+              activeViolation === v ||
+              (activeViolation.from_class === v.from_class && activeViolation.to_class === v.to_class)
+            );
+            const cat = v.category || "dependency_rule";
+            let catBadge = "DEPENDENCY RULE";
+            let catColor = "#ff7b72";
+            if (cat === "cycle") {
+              catBadge = "CIRCULAR DEPENDENCY (ADP)";
+              catColor = "#d2a8ff";
+            } else if (cat === "framework_taint") {
+              catBadge = "FRAMEWORK TAINT";
+              catColor = "#f0883e";
+            } else if (cat === "unassigned_layer") {
+              catBadge = "UNASSIGNED TYPE";
+              catColor = "#d29922";
+            }
+
+            const violSlug = `${slugify(v.from_class)}-${slugify(v.to_class || 'none')}`;
+            const isOutgoing = v.from_class === cls.name;
+
+            return `
+              <div class="inspect-violation-card ${isHighlighted ? 'active-highlight' : ''}" id="inspect-viol-${violSlug}">
+                <div class="viol-title" style="display: flex; justify-content: space-between; align-items: center;">
+                  <span style="color: ${catColor}; font-weight: 700; font-size: 11px;">⚠ ${catBadge}</span>
+                  <span style="font-size: 10px; padding: 1px 6px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #8b949e;">${isOutgoing ? 'OUTGOING' : 'INCOMING'}</span>
+                </div>
+                <div class="viol-path" style="margin: 6px 0; font-size: 11px;">
+                  <strong>${escapeHtml(v.from_class)}</strong> (${v.from_layer || 'None'}) &rarr; <strong>${escapeHtml(v.to_class || 'None')}</strong> (${v.to_layer || 'None'})
+                </div>
+                <div class="viol-reason" style="font-size: 11px; margin-bottom: 6px;">${escapeHtml(v.reason)}</div>
+                ${v.file_path ? `<div class="viol-loc" style="font-size: 10px; margin-bottom: 8px;">📍 ${escapeHtml(v.file_path)}:${v.line || 1}</div>` : ''}
+                
+                <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px;">
+                  <button class="btn btn-sm" onclick="askAgentToFixForViolation('${escapeHtml(v.from_class)}', '${escapeHtml(v.to_class || '')}', event)" style="font-size: 11px; padding: 3px 10px; background: #238636; border-color: #2ea043; color: #fff;" title="Autonomous AI Agent generates What-If DIP decoupling proposal">
+                    🤖 Fix with AI
+                  </button>
+                  <button class="btn btn-sm" onclick="askAgentToExplainViolation('${escapeHtml(v.from_class)}', '${escapeHtml(v.to_class || '')}', event)" style="font-size: 11px; padding: 3px 10px; background: rgba(163, 113, 247, 0.15); border-color: rgba(163, 113, 247, 0.4); color: #d2a8ff;" title="AI explains Clean Architecture principles & solution">
+                    💡 Explain with AI
+                  </button>
+                  ${v.file_path ? `
+                  <button class="btn btn-sm" onclick="openInEditor('${v.file_path}', ${v.line || 1}, event)" style="font-size: 11px; padding: 3px 10px; background: rgba(56, 139, 253, 0.15); border-color: rgba(56, 139, 253, 0.4); color: #58a6ff;" title="Open in VS Code">
+                    ✎ Open in VS Code
+                  </button>` : ''}
+                </div>
+
+                <div id="ai-explain-box-${violSlug}" class="ai-explanation-container"></div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      </div>
+    `;
+  } else {
+    violationsHtml = `
+      <div style="background: rgba(46, 160, 67, 0.08); border: 1px solid rgba(46, 160, 67, 0.3); border-radius: 6px; padding: 8px 12px; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; font-size: 11px; color: #7ee787;">
+        <span>✔</span> <span>No architecture violations detected for this class.</span>
+      </div>
+    `;
+  }
 
   let membersHtml = "";
   if (cls.members && cls.members.length > 0) {
@@ -646,6 +720,8 @@ function selectClass(cls) {
   }
 
   details.innerHTML = `
+    ${violationsHtml}
+
     <div class="inspect-section">
       <h4>Location</h4>
       <p style="font-family: 'JetBrains Mono', monospace; font-size: 11px; word-break: break-all; color: #e6edf3">
@@ -681,6 +757,14 @@ function selectClass(cls) {
       </div>
     </div>
   `;
+
+  if (activeViolation) {
+    const violSlug = `${slugify(activeViolation.from_class)}-${slugify(activeViolation.to_class || 'none')}`;
+    const cardEl = document.getElementById(`inspect-viol-${violSlug}`);
+    if (cardEl) {
+      cardEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }
 }
 
 function renderQualityTab() {
@@ -792,7 +876,7 @@ function renderViolationsList() {
     }
 
     return `
-    <div class="violation-card" onclick="focusViolation('${v.from_class}')">
+    <div class="violation-card" onclick="inspectViolation(${i})" style="cursor: pointer;" title="Click to view details, fix or explain with AI in Inspector">
       <div class="viol-title">
         <span style="color: ${catColor}; font-weight: 600;">⚠ ${catBadge}</span>
         <span style="font-size: 10px; color: #8b949e">#${i + 1}</span>
@@ -801,11 +885,11 @@ function renderViolationsList() {
         <strong>${escapeHtml(v.from_class)}</strong> (${v.from_layer || 'None'}) → <strong>${escapeHtml(v.to_class || 'None')}</strong> (${v.to_layer || 'None'})
       </div>
       <div class="viol-reason">${escapeHtml(v.reason)}</div>
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 6px;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
         <div class="viol-loc">📍 ${escapeHtml(v.file_path || "Unknown")}:${v.line || 1}</div>
-        <div style="display: flex; gap: 6px;">
-          ${v.file_path ? `<button class="btn btn-sm" onclick="openInEditor('${v.file_path}', ${v.line || 1}, event)" style="font-size: 10px; padding: 2px 8px; background: rgba(56, 139, 253, 0.15); border-color: rgba(56, 139, 253, 0.4); color: #58a6ff;" title="Open in VS Code">✎ Edit</button>` : ''}
-          <button class="btn btn-sm" onclick="askAgentToFix(${i}, event)" style="font-size: 10px; padding: 2px 8px; background: rgba(163, 113, 247, 0.15); border-color: rgba(163, 113, 247, 0.4); color: #d2a8ff;" title="Queue refactoring task for AI Agent">🤖 Fix with Agent</button>
+        <div style="display: flex; align-items: center; gap: 4px; font-size: 11px; color: #58a6ff; font-weight: 500;">
+          <span>Inspect & Fix</span>
+          <span>&rarr;</span>
         </div>
       </div>
     </div>
@@ -813,17 +897,91 @@ function renderViolationsList() {
   }).join("");
 }
 
-async function askAgentToFix(violationIndex, event) {
+function inspectViolation(violationIndex) {
+  const v = (graphData.violations || [])[violationIndex];
+  if (!v) return;
+
+  const cls = (graphData.classes || []).find(c => c.name === v.from_class);
+  if (cls) {
+    const card = document.getElementById(`card-${cls.id}`);
+    if (card) {
+      const group = card.closest(".ns-group.collapsed");
+      if (group) {
+        group.classList.remove("collapsed");
+        collapsedNamespaces.delete(group.dataset.nsid);
+        drawEdges();
+      }
+      card.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+    }
+    selectClass(cls, v);
+  } else {
+    switchTab("tab-inspector");
+    renderStandaloneViolationInspector(v);
+  }
+}
+
+function renderStandaloneViolationInspector(v) {
+  const inspectTitle = document.getElementById("inspect-title");
+  const inspectSub = document.getElementById("inspect-subtitle");
+  const details = document.getElementById("inspect-details");
+
+  inspectTitle.textContent = v.from_class;
+  inspectSub.textContent = `Layer: ${v.from_layer || 'Unassigned'}`;
+
+  const cat = v.category || "dependency_rule";
+  let catBadge = "DEPENDENCY RULE";
+  let catColor = "#ff7b72";
+  if (cat === "cycle") { catBadge = "CIRCULAR DEPENDENCY (ADP)"; catColor = "#d2a8ff"; }
+  else if (cat === "framework_taint") { catBadge = "FRAMEWORK TAINT"; catColor = "#f0883e"; }
+  else if (cat === "unassigned_layer") { catBadge = "UNASSIGNED TYPE"; catColor = "#d29922"; }
+
+  const violSlug = `${slugify(v.from_class)}-${slugify(v.to_class || 'none')}`;
+
+  details.innerHTML = `
+    <div class="inspect-section">
+      <h4 style="color: #ff7b72;">⚠ Architecture Violation</h4>
+      <div class="inspect-violation-card active-highlight">
+        <div class="viol-title" style="display: flex; justify-content: space-between; align-items: center;">
+          <span style="color: ${catColor}; font-weight: 700; font-size: 11px;">⚠ ${catBadge}</span>
+        </div>
+        <div class="viol-path" style="margin: 6px 0; font-size: 11px;">
+          <strong>${escapeHtml(v.from_class)}</strong> (${v.from_layer || 'None'}) &rarr; <strong>${escapeHtml(v.to_class || 'None')}</strong> (${v.to_layer || 'None'})
+        </div>
+        <div class="viol-reason" style="font-size: 11px; margin-bottom: 6px;">${escapeHtml(v.reason)}</div>
+        ${v.file_path ? `<div class="viol-loc" style="font-size: 10px; margin-bottom: 8px;">📍 ${escapeHtml(v.file_path)}:${v.line || 1}</div>` : ''}
+
+        <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+          <button class="btn btn-sm" onclick="askAgentToFixForViolation('${escapeHtml(v.from_class)}', '${escapeHtml(v.to_class || '')}', event)" style="font-size: 11px; padding: 4px 10px; background: #238636; border-color: #2ea043; color: #fff;">
+            🤖 Fix with AI
+          </button>
+          <button class="btn btn-sm" onclick="askAgentToExplainViolation('${escapeHtml(v.from_class)}', '${escapeHtml(v.to_class || '')}', event)" style="font-size: 11px; padding: 4px 10px; background: rgba(163, 113, 247, 0.15); border-color: rgba(163, 113, 247, 0.4); color: #d2a8ff;">
+            💡 Explain with AI
+          </button>
+          ${v.file_path ? `
+          <button class="btn btn-sm" onclick="openInEditor('${v.file_path}', ${v.line || 1}, event)" style="font-size: 11px; padding: 4px 10px; background: rgba(56, 139, 253, 0.15); border-color: rgba(56, 139, 253, 0.4); color: #58a6ff;">
+            ✎ Open in VS Code
+          </button>` : ''}
+        </div>
+
+        <div id="ai-explain-box-${violSlug}" class="ai-explanation-container"></div>
+      </div>
+    </div>
+  `;
+}
+
+async function askAgentToFixForViolation(fromClass, toClass, event) {
   if (event) {
     event.preventDefault();
     event.stopPropagation();
   }
-  const v = graphData.violations[violationIndex];
+  const v = (graphData.violations || []).find(
+    x => x.from_class === fromClass && (!toClass || x.to_class === toClass)
+  );
   if (!v) return;
 
   const prompt = `Refactor '${v.from_class}' to eliminate the Clean Architecture violation with '${v.to_class}'. Apply the Dependency Inversion Principle (DIP) or introduce an interface/port abstraction in the Contracts/Application layer.`;
 
-  showToast(`Queueing task for AI Copilot...`);
+  showToast(`Queueing DIP fix for Autonomous Agent...`);
   try {
     const res = await fetch("/api/agent/tasks", {
       method: "POST",
@@ -837,12 +995,73 @@ async function askAgentToFix(violationIndex, event) {
     });
     const data = await res.json();
     if (data.status === "ok") {
-      showToast(`🤖 Task queued for AI Copilot!`);
+      showToast(`🤖 Task queued for Headless Agent!`);
       await fetchAgentTasks();
-      switchTab("tab-copilot");
     }
   } catch (err) {
     showToast(`Error queueing agent task: ${err.message}`);
+  }
+}
+
+async function askAgentToExplainViolation(fromClass, toClass, event) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  const v = (graphData.violations || []).find(
+    x => x.from_class === fromClass && (!toClass || x.to_class === toClass)
+  );
+  if (!v) return;
+
+  const violSlug = `${slugify(v.from_class)}-${slugify(v.to_class || 'none')}`;
+  const box = document.getElementById(`ai-explain-box-${violSlug}`);
+  if (box) {
+    box.style.display = "block";
+    box.innerHTML = `<div style="display: flex; align-items: center; gap: 8px; color: #d2a8ff;">
+      <span class="live-dot" style="background: #a371f7;"></span>
+      <span>AI Architecture Expert is analyzing violation...</span>
+    </div>`;
+  }
+
+  showToast(`💡 Asking AI to explain architecture rule...`);
+  try {
+    const res = await fetch("/api/agent/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        op: "explain_violation",
+        title: `Explain Clean Architecture rule for ${v.from_class} -> ${v.to_class}`,
+        target: v,
+        prompt: `Explain why ${v.from_class} depending on ${v.to_class} violates Clean Architecture and provide refactoring steps.`
+      })
+    });
+    const data = await res.json();
+    if (data.status === "ok") {
+      const taskId = data.task.id;
+      let attempts = 0;
+      const poll = setInterval(async () => {
+        attempts++;
+        const tasksRes = await fetch("/api/agent/tasks");
+        const tasks = await tasksRes.json();
+        const updated = tasks.find(t => t.id === taskId);
+        if (updated && updated.status === "completed" && updated.result) {
+          clearInterval(poll);
+          if (box) {
+            let html = escapeHtml(updated.result)
+              .replace(/### (.*?)\n/g, '<h3 style="color: #d2a8ff; margin: 4px 0 8px 0; font-size: 12px;">$1</h3>')
+              .replace(/\*\*(.*?)\*\*/g, '<strong style="color: #f0f6fc;">$1</strong>')
+              .replace(/`([^`]+)`/g, '<code style="background: rgba(255,255,255,0.1); padding: 1px 4px; border-radius: 3px; font-family: monospace;">$1</code>')
+              .replace(/\n\n/g, '<br><br>');
+            box.innerHTML = html;
+          }
+          showToast(`💡 Explanation ready!`);
+        } else if (attempts > 12) {
+          clearInterval(poll);
+        }
+      }, 350);
+    }
+  } catch (err) {
+    if (box) box.textContent = `Failed to get explanation: ${err.message}`;
   }
 }
 
@@ -1018,6 +1237,10 @@ function switchTab(tabId) {
 function escapeHtml(str) {
   if (!str) return "";
   return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function slugify(text) {
+  return String(text || "").replace(/[^a-zA-Z0-9]+/g, "-").replace(/^-+|-+$/g, "").toLowerCase();
 }
 
 window.addEventListener("DOMContentLoaded", init);
