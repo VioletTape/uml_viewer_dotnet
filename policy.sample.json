@@ -1,0 +1,44 @@
+{
+  "name": "OrgStructure Architecture Policy",
+  "prefix": "OrgStructure",
+  "just_my_code": true,
+  "layers": [
+    {
+      "name": "Domain",
+      "pattern": "(^|\\.)Domain(\\..*)?$",
+      "rank": 0,
+      "description": "Core business entities, value objects, domain interfaces. Inner-most layer, depends on nothing."
+    },
+    {
+      "name": "Contracts",
+      "pattern": "(^|\\.)Contracts(\\..*)?$",
+      "rank": 1,
+      "description": "Shared DTOs, events, and API interfaces."
+    },
+    {
+      "name": "Application",
+      "pattern": "(^|\\.)(Application|Services)(\\..*)?$",
+      "rank": 2,
+      "description": "Use cases, application workflows, commands, and queries."
+    },
+    {
+      "name": "Infrastructure",
+      "pattern": "(^|\\.)Infrastructure(\\..*)?$",
+      "rank": 3,
+      "description": "Database, external API clients, message bus, repositories."
+    },
+    {
+      "name": "Api",
+      "pattern": "(^|\\.)(Api|Controllers|Endpoints|Web)(\\..*)?$",
+      "rank": 4,
+      "description": "HTTP and gRPC endpoints, entrypoint host."
+    },
+    {
+      "name": "Client",
+      "pattern": "(^|\\.)Client(\\..*)?$",
+      "rank": 5,
+      "description": "SDK and client library for external consumers."
+    }
+  ],
+  "allowed_dependencies": {}
+}

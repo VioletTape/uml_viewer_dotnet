@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>.NET Clean Architecture & UML Viewer</title>
+  <link rel="stylesheet" href="style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- Top Navigation & Controls Header -->
+  <header class="top-nav">
+    <div class="brand">
+      <div class="logo-icon">📐</div>
+      <div class="brand-text">
+        <h1 id="proj-title">.NET Architecture Viewer</h1>
+        <span class="sub" id="proj-subtitle">Clean Architecture & Quality Radar</span>
+      </div>
+    </div>
+
+    <!-- Stats & Traffic Lights -->
+    <div class="stats-bar">
+      <div class="stat-badge" id="stat-classes">
+        <span class="stat-val">0</span>
+        <span class="stat-lbl">Classes</span>
+      </div>
+      <div class="stat-badge" id="stat-edges">
+        <span class="stat-val">0</span>
+        <span class="stat-lbl">Dependencies</span>
+      </div>
+      <div class="stat-badge alert" id="stat-violations">
+        <span class="stat-val">0</span>
+        <span class="stat-lbl">Violations</span>
+      </div>
+      <div class="stat-badge live-badge" id="live-badge" title="Live Auto-Reload via SSE">
+        <span class="live-dot">●</span>
+        <span class="live-text">Live Sync</span>
+      </div>
+    </div>
+
+    <!-- Controls Toolbar -->
+    <div class="toolbar">
+      <div class="btn-group">
+        <button id="btn-filter-violations" class="btn btn-alert active" title="Show only Clean Architecture violations">⚡ Violations Only</button>
+        <button id="btn-filter-focus" class="btn" title="Highlight edges when hovering or selecting a class">Focus Mode</button>
+        <button id="btn-filter-all" class="btn" title="Show all dependency arrows">All Edges</button>
+      </div>
+
+      <div class="btn-group">
+        <button id="btn-zoom-in" class="btn btn-icon" title="Zoom In">+</button>
+        <button id="btn-zoom-reset" class="btn btn-icon" title="Reset View">1:1</button>
+        <button id="btn-zoom-out" class="btn btn-icon" title="Zoom Out">-</button>
+      </div>
+
+      <button id="btn-toggle-crap" class="btn" title="Toggle CRAP risk scores and traffic lights">🎯 CRAP Overlay</button>
+      <button id="btn-refresh" class="btn btn-primary" title="Refresh code graph from codegraph.db">↻ Refresh</button>
+    </div>
+  </header>
+
+  <!-- Main Viewport Area -->
+  <main class="main-container">
+    <!-- SVG Canvas for Interactive Graph -->
+    <div class="viewport" id="viewport">
+      <div class="canvas-transform" id="canvas">
+        <svg id="svg-edges" class="svg-layer">
+          <defs>
+            <marker id="arrow-default" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M 0 1 L 8 5 L 0 9 z" fill="#484f58" />
+            </marker>
+            <marker id="arrow-viol" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+              <path d="M 0 1 L 8 5 L 0 9 z" fill="#f85149" />
+            </marker>
+            <marker id="arrow-highlight" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+              <path d="M 0 1 L 8 5 L 0 9 z" fill="#58a6ff" />
+            </marker>
+          </defs>
+        </svg>
+        <div id="layers-container" class="layers-grid"></div>
+      </div>
+    </div>
+
+    <!-- Side Panel / Inspector -->
+    <aside class="side-panel" id="side-panel">
+      <div class="panel-tabs">
+        <button class="tab-btn active" data-tab="tab-violations">Violations (<span id="tab-viol-count">0</span>)</button>
+        <button class="tab-btn" data-tab="tab-inspector">Inspector</button>
+        <button class="tab-btn" data-tab="tab-quality">Quality / CRAP</button>
+        <button class="tab-btn" data-tab="tab-nuget">NuGet</button>
+      </div>
+
+      <div class="panel-body">
+        <!-- Tab 1: Violations List -->
+        <div class="tab-content active" id="tab-violations">
+          <div class="tab-header">
+            <h3>Clean Architecture Violations</h3>
+            <p class="tab-desc">Dependencies breaking the Dependency Rule (inner layer depending on outer layer).</p>
+          </div>
+          <div class="violations-list" id="violations-list">
+            <div class="empty-state">No violations detected! Architecture is clean.</div>
+          </div>
+        </div>
+
+        <!-- Tab 2: Class Details Inspector -->
+        <div class="tab-content" id="tab-inspector">
+          <div class="tab-header">
+            <h3 id="inspect-title">Select a Class</h3>
+            <p class="tab-desc" id="inspect-subtitle">Click any box on canvas to inspect fields, methods, and source.</p>
+          </div>
+          <div id="inspect-details" class="inspect-details">
+            <div class="empty-state">No class selected</div>
+          </div>
+        </div>
+
+        <!-- Tab 3: Quality & CRAP Analysis -->
+        <div class="tab-content" id="tab-quality">
+          <div class="tab-header">
+            <h3>Quality & CRAP Analysis</h3>
+            <p class="tab-desc">Change Risk Analysis & Predictor: CRAP = comp² × (1 - cov)³ + comp</p>
+          </div>
+          <div id="quality-details" class="quality-details">
+            <div class="empty-state">Loading quality metrics...</div>
+          </div>
+        </div>
+
+        <!-- Tab 4: External Packages ("Just My Code") -->
+        <div class="tab-content" id="tab-nuget">
+          <div class="tab-header">
+            <h3>External NuGet Dependencies</h3>
+            <p class="tab-desc">Third-party packages referenced by project types.</p>
+          </div>
+          <div class="nuget-list" id="nuget-list">
+            <div class="empty-state">No external packages found</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast">Architecture updated</div>
+  <script src="app.js"></script>
+</body>
+</html>
