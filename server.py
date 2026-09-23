@@ -21,6 +21,7 @@ from typing import Dict, Optional, Set
 from extractor import CodeGraphExtractor
 from policy import ArchitecturePolicy
 from metrics import QualityMetricsEngine
+from headless_agent import HeadlessAgentWorker
 
 DEFAULT_PORT = 5050
 
@@ -137,6 +138,7 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
     project_path = ""
     prefix = ""
     policy_path = ""
+    agent_worker: Optional[HeadlessAgentWorker] = None
 
     def __init__(self, *args, **kwargs):
         frontend_dir = os.path.join(os.path.dirname(__file__), "frontend")
@@ -359,6 +361,9 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             print(f"[Copilot] New task queued: {task['id']} - {task['title']}")
             notify_all({"type": "agent_task_queued", "task": task})
 
+            if ArchitectureHandler.agent_worker:
+                ArchitectureHandler.agent_worker.trigger()
+
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -544,6 +549,13 @@ def run_server(project_path: str, prefix: str = "", policy_path: str = "", port:
     )
     watcher_thread.start()
 
+    # Start autonomous headless agent daemon
+    ArchitectureHandler.agent_worker = HeadlessAgentWorker(
+        ArchitectureHandler.project_path,
+        notify_cb=notify_all
+    )
+    ArchitectureHandler.agent_worker.start()
+
     print(f"\n=======================================================")
     print(f" .NET Clean Architecture & UML Viewer")
     print(f"=======================================================")
@@ -551,6 +563,7 @@ def run_server(project_path: str, prefix: str = "", policy_path: str = "", port:
     print(f" Prefix:    {prefix or '(auto-detect)'}")
     print(f" URL:       http://localhost:{port}")
     print(f" LiveSync:  Watching .codegraph/codegraph.db & policy")
+    print(f" Agent:     Autonomous Headless Daemon Active")
     print(f"=======================================================\n")
 
     http.server.ThreadingHTTPServer.allow_reuse_address = True
@@ -560,6 +573,8 @@ def run_server(project_path: str, prefix: str = "", policy_path: str = "", port:
         except KeyboardInterrupt:
             print("\nShutting down server.")
             server_stopping = True
+            if ArchitectureHandler.agent_worker:
+                ArchitectureHandler.agent_worker.stop()
 
 
 if __name__ == "__main__":
