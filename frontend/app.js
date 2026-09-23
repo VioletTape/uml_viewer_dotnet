@@ -614,22 +614,38 @@ function renderViolationsList() {
     return;
   }
 
-  container.innerHTML = violations.map((v, i) => `
+  container.innerHTML = violations.map((v, i) => {
+    const cat = v.category || "dependency_rule";
+    let catBadge = "DEPENDENCY RULE";
+    let catColor = "#ff7b72";
+    if (cat === "cycle") {
+      catBadge = "CIRCULAR DEPENDENCY (ADP)";
+      catColor = "#d2a8ff";
+    } else if (cat === "framework_taint") {
+      catBadge = "FRAMEWORK TAINT";
+      catColor = "#f0883e";
+    } else if (cat === "unassigned_layer") {
+      catBadge = "UNASSIGNED TYPE";
+      catColor = "#d29922";
+    }
+
+    return `
     <div class="violation-card" onclick="focusViolation('${v.from_class}')">
       <div class="viol-title">
-        <span>⚠ VIOLATION</span>
+        <span style="color: ${catColor}; font-weight: 600;">⚠ ${catBadge}</span>
         <span style="font-size: 10px; color: #8b949e">#${i + 1}</span>
       </div>
       <div class="viol-path">
-        <strong>${escapeHtml(v.from_class)}</strong> (${v.from_layer}) → <strong>${escapeHtml(v.to_class)}</strong> (${v.to_layer})
+        <strong>${escapeHtml(v.from_class)}</strong> (${v.from_layer || 'None'}) → <strong>${escapeHtml(v.to_class || 'None')}</strong> (${v.to_layer || 'None'})
       </div>
       <div class="viol-reason">${escapeHtml(v.reason)}</div>
       <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 6px;">
         <div class="viol-loc">📍 ${escapeHtml(v.file_path || "Unknown")}:${v.line || 1}</div>
-        <button class="btn btn-sm" onclick="openInEditor('${v.file_path}', ${v.line || 1}, event)" style="font-size: 10px; padding: 2px 8px; background: rgba(56, 139, 253, 0.15); border-color: rgba(56, 139, 253, 0.4); color: #58a6ff;" title="Open in VS Code">✎ Edit</button>
+        ${v.file_path ? `<button class="btn btn-sm" onclick="openInEditor('${v.file_path}', ${v.line || 1}, event)" style="font-size: 10px; padding: 2px 8px; background: rgba(56, 139, 253, 0.15); border-color: rgba(56, 139, 253, 0.4); color: #58a6ff;" title="Open in VS Code">✎ Edit</button>` : ''}
       </div>
     </div>
-  `).join("");
+  `;
+  }).join("");
 }
 
 function focusViolation(className) {

@@ -94,6 +94,7 @@ class CodeGraphExtractor:
                 "is_abstract": bool(row["is_abstract"]),
                 "is_static": bool(row["is_static"]),
                 "members": [],
+                "external_refs": [],
                 "foreign": False
             }
             nodes_by_id[row["id"]] = node_data
@@ -224,6 +225,9 @@ class CodeGraphExtractor:
             src_class_id = self._resolve_to_class(conn, row["from_node_id"], nodes_by_id)
             if src_class_id:
                 package_map[root_pkg]["referencing_classes"].add(src_class_id)
+                if src_class_id in nodes_by_id:
+                    if root_pkg not in nodes_by_id[src_class_id]["external_refs"]:
+                        nodes_by_id[src_class_id]["external_refs"].append(root_pkg)
 
 
         return [
