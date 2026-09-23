@@ -26,7 +26,7 @@ Eliminates the Java 21 / Quil / Processing / Swing / tmux dependencies of the or
 From the `/home/vt/exp/dotnet-uml-viewer` directory, start the server pointing to any .NET project with `.codegraph`:
 
 ```bash
-python3 server.py /home/vt/projects/organizations OrgStructure
+python3 server.py /path/to/your/project MyProject
 ```
 
 Then open your browser to:
@@ -37,7 +37,7 @@ Then open your browser to:
 python3 server.py <project-path> [namespace-prefix] [policy-file-path]
 ```
 - `<project-path>`: Path to project root containing `.codegraph/codegraph.db`.
-- `[namespace-prefix]`: Optional root namespace prefix (e.g. `OrgStructure`).
+- `[namespace-prefix]`: Optional root namespace prefix (e.g. `ACME`).
 - `[policy-file-path]`: Optional path to a custom `policy.json` (defaults to standard Clean Architecture layers).
 
 ---
