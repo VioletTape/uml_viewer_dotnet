@@ -1252,7 +1252,11 @@ function renderNuGetList() {
 
   container.innerHTML = packages.map(p => `
     <div class="violation-card" style="background: rgba(56, 139, 253, 0.08); border-color: rgba(56, 139, 253, 0.3)">
-      <div style="font-weight: 700; color: #58a6ff; font-size: 13px">📦 ${escapeHtml(p.package)}</div>
+      <div style="font-weight: 700; color: #58a6ff; font-size: 13px">📦 ${escapeHtml(p.package)}${p.version ? ` <span style="font-size: 11px; font-weight: normal; color: #8b949e">v${escapeHtml(p.version)}</span>` : ''}</div>
+      ${p.versions?.length > 1 ? `<div style="color: #d29922; font-size: 12px; margin-top: 4px">
+        Consolidate versions: ${p.versions.map(escapeHtml).join(", ")}
+        ${Object.entries(p.version_projects || {}).map(([version, projects]) => `<div>${escapeHtml(version || 'Unknown version')}: ${projects.map(escapeHtml).join(', ')}</div>`).join('')}
+      </div>` : ''}
       <div style="font-size: 11px; color: #8b949e; margin-top: 4px">
         Referenced by ${p.referenced_by_count} classes
       </div>

@@ -6,6 +6,8 @@ Filters out BCL noise and collapses NuGet dependencies ("Just My Code").
 import os
 import re
 import sqlite3
+import xml.etree.ElementTree as ET
+from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
 
@@ -55,6 +57,16 @@ class CodeGraphExtractor:
             if namespace == ign or namespace.startswith(ign + "."):
                 return False
         return True
+
+    def _is_ignored_external(self, name: str) -> bool:
+        """Returns True if the external package/import should be ignored (internal code or BCL framework noise)."""
+        if self.prefix and (name == self.prefix or name.startswith(self.prefix + ".")):
+            return True
+        if self.just_my_code:
+            for ign in self.ignored_namespaces:
+                if name == ign or name.startswith(ign + "."):
+                    return True
+        return False
 
     def extract(self) -> Dict:
         """Extracts nodes and edges from SQLite database."""
@@ -188,54 +200,131 @@ class CodeGraphExtractor:
                 return parent_id
         return None
 
+    def _parse_csproj_packages(self) -> Dict[str, Dict]:
+        """Scans project directory for .csproj files and extracts PackageReference entries."""
+        packages = {}
+        # Check for Central Package Management (CPM) Directory.Packages.props
+        cpm_versions = {}
+        props_path = os.path.join(self.project_path, "Directory.Packages.props")
+        if os.path.isfile(props_path):
+            try:
+                tree = ET.parse(props_path)
+                for pv in tree.findall(".//PackageVersion"):
+                    pkg_name = pv.get("Include") or pv.get("Update")
+                    ver = pv.get("Version")
+                    if pkg_name and ver:
+                        cpm_versions[pkg_name.lower()] = ver
+            except Exception:
+                pass
+
+        for root, dirs, files in os.walk(self.project_path):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("bin", "obj", "node_modules")]
+            for file in files:
+                if file.endswith(".csproj"):
+                    csproj_path = os.path.join(root, file)
+                    try:
+                        tree = ET.parse(csproj_path)
+                        for pr in tree.findall(".//PackageReference"):
+                            name = pr.get("Include") or pr.get("Update")
+                            if not name:
+                                continue
+                            if self._is_ignored_external(name):
+                                continue
+                            version = pr.get("Version")
+                            if not version:
+                                ver_elem = pr.find("Version")
+                                if ver_elem is not None and ver_elem.text:
+                                    version = ver_elem.text
+                            if not version and name.lower() in cpm_versions:
+                                version = cpm_versions[name.lower()]
+                            name = next((pkg for pkg in packages if pkg.lower() == name.lower()), name)
+                            if name not in packages:
+                                packages[name] = {
+                                    "package": name,
+                                    "version_projects": defaultdict(set),
+                                    "types": set(),
+                                    "referencing_classes": set()
+                                }
+                            packages[name]["version_projects"][version or ""].add(
+                                os.path.relpath(csproj_path, self.project_path)
+                            )
+                    except Exception:
+                        pass
+        return packages
+
+    def _matches_package(self, pkg_name: str, import_name: str) -> bool:
+        """Match a package's namespace and its children, never sibling packages."""
+        # ponytail: namespace/package names are heuristic; assembly metadata is needed for aliases.
+        pkg = pkg_name.lower()
+        imp = import_name.lower()
+        return imp == pkg or imp.startswith(pkg + ".")
+
     def _extract_nuget_dependencies(self, conn: sqlite3.Connection, nodes_by_id: Dict) -> List[Dict]:
         """Extract external NuGet references aggregated by package name."""
+        csproj_packages = self._parse_csproj_packages()
+
+        # Build map of file_path -> class IDs
+        file_to_classes = defaultdict(list)
+        for class_id, node in nodes_by_id.items():
+            fpath = node.get("file_path")
+            if fpath:
+                file_to_classes[os.path.normpath(fpath)].append(class_id)
+
         cursor = conn.cursor()
         cursor.execute("""
             SELECT reference_name, reference_kind, from_node_id, file_path
             FROM unresolved_refs
-            WHERE reference_kind IN ('imports', 'extends', 'implements', 'references', 'calls')
+            WHERE reference_kind IN ('imports', 'extends', 'implements', 'references', 'calls', 'instantiates')
         """)
-        raw_refs = cursor.fetchall()
-
-        package_map = {}
-        for row in raw_refs:
-            target = row["reference_name"] or ""
-            # Extract root package name (e.g. MassTransit from MassTransit.RabbitMq)
-            parts = target.split(".")
-            if not parts or not parts[0]:
+        package_map = csproj_packages.copy()
+        for row in cursor.fetchall():
+            imp_name = row["reference_name"] or ""
+            imp_name = imp_name.removeprefix("global::")
+            if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*', imp_name):
                 continue
-            root_pkg = parts[0]
-            if len(parts) > 1 and parts[0] in ("Microsoft", "System"):
-                root_pkg = f"{parts[0]}.{parts[1]}"
-
-            # Ignore internal and standard framework
-            if root_pkg in self.ignored_namespaces or (self.prefix and root_pkg.startswith(self.prefix)):
+            if self._is_ignored_external(imp_name):
+                continue
+            is_import = row["reference_kind"] == "imports"
+            if not is_import and (not csproj_packages or "." not in imp_name):
                 continue
 
-            if root_pkg not in package_map:
-                package_map[root_pkg] = {
-                    "package": root_pkg,
-                    "types": set(),
-                    "referencing_classes": set()
-                }
+            if csproj_packages:
+                matches = [pkg for pkg in csproj_packages if self._matches_package(pkg, imp_name)]
+                if not matches:
+                    continue
+                # A declared subpackage takes precedence over its parent package.
+                pkg_name = max(matches, key=len)
+            else:
+                # Without manifests, only imports can supply inferred package names.
+                parts = imp_name.split(".")
+                pkg_name = ".".join(parts[:2]) if parts[0] in ("Microsoft", "System") else parts[0]
+                if self._is_ignored_external(pkg_name):
+                    continue
+                package_map.setdefault(pkg_name, {
+                    "version_projects": {}, "types": set(), "referencing_classes": set()
+                })
 
-            if len(parts) > 1:
-                package_map[root_pkg]["types"].add(parts[-1])
-
+            fpath = os.path.normpath(row["file_path"]) if row["file_path"] else ""
+            class_ids = set(file_to_classes.get(fpath, [])) if is_import else set()
             src_class_id = self._resolve_to_class(conn, row["from_node_id"], nodes_by_id)
             if src_class_id:
-                package_map[root_pkg]["referencing_classes"].add(src_class_id)
-                if src_class_id in nodes_by_id:
-                    if root_pkg not in nodes_by_id[src_class_id]["external_refs"]:
-                        nodes_by_id[src_class_id]["external_refs"].append(root_pkg)
+                class_ids.add(src_class_id)
+            data = package_map[pkg_name]
+            data["types"].add(imp_name.split(".")[-1])
+            data["referencing_classes"].update(class_ids)
+            for cid in class_ids:
+                if pkg_name not in nodes_by_id[cid]["external_refs"]:
+                    nodes_by_id[cid]["external_refs"].append(pkg_name)
 
-
-        return [
-            {
+        result = []
+        for pkg, data in sorted(package_map.items(), key=lambda x: (-len(x[1]["referencing_classes"]), x[0])):
+            versions = sorted(v for v in data["version_projects"] if v)
+            result.append({
                 "package": pkg,
-                "types": sorted(list(data["types"]))[:5],  # Top types
+                "version": versions[0] if len(versions) == 1 else "",
+                "versions": versions,
+                "version_projects": {v: sorted(paths) for v, paths in sorted(data["version_projects"].items())},
+                "types": sorted(data["types"])[:5],
                 "referenced_by_count": len(data["referencing_classes"])
-            }
-            for pkg, data in package_map.items()
-        ]
+            })
+        return result

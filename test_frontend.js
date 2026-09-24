@@ -98,3 +98,25 @@ assert(leaf.classes.some(c => c.id === 'b') && leaf.classes.some(c => c.id === '
 assert.equal(context.buildNamespaceView({classes: [], edges: []}, '').classes.length, 0);
 assert.equal(context.namespaceRoot([{namespace: ''}, {namespace: 'App'}]), '');
 console.log("Namespace regression checks passed: grouping, drill-down, boundaries, and bundled edges.");
+
+vm.runInContext(`
+  graphData.external_packages = [{package: 'Dapper', version: '',
+    versions: ['2.0.0', '2.1.79'],
+    version_projects: {'2.0.0': ['Other.csproj'], '2.1.79': ['App.csproj', payload]},
+    types: [], referenced_by_count: 1}];
+  renderNuGetList();
+`, context);
+const packagesHtml = byId.get('nuget-list').innerHTML;
+assert(packagesHtml.includes('Consolidate versions: 2.0.0, 2.1.79'));
+assert(packagesHtml.includes('2.0.0: Other.csproj'));
+assert(packagesHtml.includes('2.1.79: App.csproj'));
+assert(packagesHtml.includes('&lt;img'));
+assert(!packagesHtml.includes('<img'));
+vm.runInContext(`
+  graphData.external_packages[0].versions = ['2.1.79'];
+  graphData.external_packages[0].version = '2.1.79';
+  renderNuGetList();
+`, context);
+assert(!byId.get('nuget-list').innerHTML.includes('Consolidate versions'));
+assert(byId.get('nuget-list').innerHTML.includes('v2.1.79'));
+console.log('NuGet regression checks passed: version conflicts, project paths, and escaped HTML.');

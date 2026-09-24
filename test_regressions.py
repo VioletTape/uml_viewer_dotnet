@@ -173,6 +173,101 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(json.loads(graph_response[2])["violations"], [])
         self.assertEqual(json.loads(violations_response[2]), [])
 
+    def test_nuget_extraction_uses_csproj_and_ignores_garbage_expressions(self):
+        # 1. Write a real .csproj file with package references
+        csproj = self.project / "App.csproj"
+        csproj.write_text("""<Project Sdk="Microsoft.NET.Sdk">
+          <ItemGroup>
+            <PackageReference Include="MassTransit.RabbitMQ" Version="8.5.9" />
+            <PackageReference Include="Dapper" Version="2.1.79" />
+            <PackageReference Include="Google.Protobuf" Version="3.0.0" />
+            <PackageReference Include="Google.Cloud.Storage.V1" Version="4.0.0" />
+            <PackageReference Include="Example" Version="1.0.0" />
+            <PackageReference Include="Example.Transport" Version="1.0.0" />
+          </ItemGroup>
+        </Project>""")
+
+        # 2. Setup SQLite database with valid nodes and unresolved_refs containing garbage
+        (self.project / "C.cs").write_text("class C {}")
+        (self.project / ".codegraph").mkdir(exist_ok=True)
+        with sqlite3.connect(self.project / ".codegraph" / "codegraph.db") as db:
+            db.executescript("""
+                CREATE TABLE nodes (id TEXT, kind TEXT, name TEXT, qualified_name TEXT,
+                    file_path TEXT, start_line INT, end_line INT, is_abstract INT,
+                    is_static INT, visibility TEXT, signature TEXT, docstring TEXT);
+                CREATE TABLE edges (source TEXT, target TEXT, kind TEXT, line INT, col INT);
+                CREATE TABLE unresolved_refs (reference_name TEXT, reference_kind TEXT,
+                    from_node_id TEXT, file_path TEXT);
+                INSERT INTO nodes VALUES ('c','class','C','App.Domain::C','C.cs',1,8,0,0,'public','','');
+                -- Valid import corresponding to MassTransit package
+                INSERT INTO unresolved_refs VALUES ('MassTransit.RabbitMQ', 'imports', 'c', 'C.cs');
+                INSERT INTO unresolved_refs VALUES ('MassTransit.Testing', 'imports', 'c', 'C.cs');
+                -- Fully qualified dependency, with no Dapper using directive
+                INSERT INTO unresolved_refs VALUES ('global::Dapper.SqlMapper', 'references', 'c', 'C.cs');
+                INSERT INTO unresolved_refs VALUES ('Google.Protobuf.Collections', 'imports', 'file', 'C.cs');
+                INSERT INTO unresolved_refs VALUES ('Example.Transport.Options', 'imports', 'c', 'C.cs');
+                INSERT INTO unresolved_refs VALUES ('Example.TransportExtra', 'imports', 'c', 'C.cs');
+                -- A reference from C must not taint another class in the same file
+                INSERT INTO nodes VALUES ('d','class','D','App.Domain::D','C.cs',9,10,0,0,'public','','');
+                -- Garbage entries that codegraph generates
+                INSERT INTO unresolved_refs VALUES ('services.AddMassTransit', 'calls', 'c', 'C.cs');
+                INSERT INTO unresolved_refs VALUES ('((string)childAktor', 'calls', 'c', 'C.cs');
+                INSERT INTO unresolved_refs VALUES ('(await LoadCompanyRow())', 'calls', 'c', 'C.cs');
+                INSERT INTO unresolved_refs VALUES ('IServiceCollection', 'references', 'c', 'C.cs');
+                INSERT INTO unresolved_refs VALUES ('Exception', 'references', 'c', 'C.cs');
+            """)
+
+        extractor = CodeGraphExtractor(str(self.project), prefix="App")
+        graph = extractor.extract()
+
+        pkgs = {p["package"]: p for p in graph["external_packages"]}
+        # Real packages are extracted with their versions and referencing count
+        self.assertIn("MassTransit.RabbitMQ", pkgs)
+        self.assertEqual(pkgs["MassTransit.RabbitMQ"]["version"], "8.5.9")
+        self.assertEqual(pkgs["MassTransit.RabbitMQ"]["referenced_by_count"], 2)
+        self.assertNotIn("Testing", pkgs["MassTransit.RabbitMQ"]["types"])
+
+        self.assertIn("Dapper", pkgs)
+        self.assertEqual(pkgs["Dapper"]["version"], "2.1.79")
+        self.assertEqual(pkgs["Dapper"]["referenced_by_count"], 1)
+        self.assertEqual(pkgs["Google.Protobuf"]["referenced_by_count"], 2)
+        self.assertEqual(pkgs["Google.Cloud.Storage.V1"]["referenced_by_count"], 0)
+        self.assertEqual(pkgs["Example"]["types"], ["TransportExtra"])
+        self.assertEqual(pkgs["Example.Transport"]["types"], ["Options"])
+        classes = {c["id"]: c for c in graph["classes"]}
+        self.assertIn("Dapper", classes["c"]["external_refs"])
+        self.assertNotIn("Dapper", classes["d"]["external_refs"])
+        policy = ArchitecturePolicy()
+        policy.forbidden_external = {"Domain": ["Dapper"]}
+        self.assertEqual(len(policy.check_framework_isolation(classes["c"], "Domain")), 1)
+
+        # None of the AST call/variable rubbish is present as packages
+        self.assertNotIn("services", pkgs)
+        self.assertNotIn("((string)childAktor", pkgs)
+        self.assertNotIn("(await LoadCompanyRow())", pkgs)
+        self.assertNotIn("IServiceCollection", pkgs)
+        self.assertNotIn("Exception", pkgs)
+
+        # Package identity is case-insensitive; retain every version and its projects.
+        (self.project / "Other.csproj").write_text('''<Project><ItemGroup>
+          <PackageReference Include="dapper" Version="2.0.0" />
+        </ItemGroup></Project>''')
+        pkgs = {p["package"].lower(): p for p in extractor.extract()["external_packages"]}
+        self.assertEqual(pkgs["dapper"]["version"], "")
+        self.assertEqual(pkgs["dapper"]["versions"], ["2.0.0", "2.1.79"])
+        self.assertEqual(pkgs["dapper"]["version_projects"], {
+            "2.0.0": ["Other.csproj"], "2.1.79": ["App.csproj"]
+        })
+
+        # Fully qualified calls, base types and interfaces also retain the dependency.
+        for kind in ("calls", "extends", "implements", "instantiates"):
+            with self.subTest(kind=kind):
+                with sqlite3.connect(extractor.db_path) as db:
+                    db.execute("UPDATE unresolved_refs SET reference_kind = ? WHERE reference_name = ?",
+                               (kind, "global::Dapper.SqlMapper"))
+                pkgs = {p["package"].lower(): p for p in extractor.extract()["external_packages"]}
+                self.assertEqual(pkgs["dapper"]["referenced_by_count"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
