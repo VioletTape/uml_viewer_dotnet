@@ -55,9 +55,9 @@ class QualityMetricsEngine:
                 return p
 
         # 2. TestResults or bin folders
-        for root, _, files in os.walk(self.project_path):
-            if ".git" in root or "obj" in root or ".codegraph" in root:
-                continue
+        excluded_dirs = {"obj", ".git", ".codegraph", "node_modules", ".vs"}
+        for root, dirs, files in os.walk(self.project_path):
+            dirs[:] = [d for d in dirs if d not in excluded_dirs and not d.startswith(".")]
             for f in files:
                 f_lower = f.lower()
                 if ("coverage" in f_lower or "cobertura" in f_lower or "opencover" in f_lower) and (f.endswith(".xml") or f.endswith(".json")):
@@ -79,9 +79,9 @@ class QualityMetricsEngine:
                 found.append(p)
 
         # 2. TestResults or bin folders
-        for root, _, files in os.walk(self.project_path):
-            if ".git" in root or "obj" in root or ".codegraph" in root:
-                continue
+        excluded_dirs = {"obj", ".git", ".codegraph", "node_modules", ".vs"}
+        for root, dirs, files in os.walk(self.project_path):
+            dirs[:] = [d for d in dirs if d not in excluded_dirs and not d.startswith(".")]
             for f in files:
                 f_lower = f.lower()
                 if ("coverage" in f_lower or "cobertura" in f_lower or "opencover" in f_lower) and (f.endswith(".xml") or f.endswith(".json")):
@@ -121,9 +121,15 @@ class QualityMetricsEngine:
     def _parse_coverage_xml(self, file_path: str):
         tree = ET.parse(file_path)
         root = tree.getroot()
+        # Normalize away XML namespaces from tags across the tree
+        for el in root.iter():
+            if "}" in el.tag:
+                el.tag = el.tag.split("}", 1)[1]
+
+        root_tag = root.tag.lower()
 
         # Cobertura format (<coverage ...><packages>...)
-        if root.tag == "coverage":
+        if root_tag == "coverage":
             sources = [s.text.strip() for s in root.iter("source") if s.text]
             for cls_el in root.iter("class"):
                 c_name = cls_el.get("name", "")
@@ -168,7 +174,7 @@ class QualityMetricsEngine:
                 self.class_coverage[short_class] = self.class_coverage[c_name]
 
         # OpenCover format (<CoverageSession>...)
-        elif root.tag == "CoverageSession":
+        elif root_tag.lower() == "coveragesession":
             file_map = {}
             for f_el in root.iter("File"):
                 fid = f_el.get("uid")

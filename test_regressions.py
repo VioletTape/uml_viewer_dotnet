@@ -268,6 +268,59 @@ class RegressionTests(unittest.TestCase):
                 pkgs = {p["package"].lower(): p for p in extractor.extract()["external_packages"]}
                 self.assertEqual(pkgs["dapper"]["referenced_by_count"], 1)
 
+    def test_infra_scanner_simple_yaml_parser_without_error(self):
+        from infra_scanner import _parse_simple_yaml
+        yaml_content = """
+application:
+  name: order-service
+replicaCount: 3
+environments:
+  - production
+"""
+        parsed = _parse_simple_yaml(yaml_content)
+        self.assertEqual(parsed.get("replicaCount"), 3)
+        self.assertEqual(parsed.get("application", {}).get("name"), "order-service")
+
+    def test_cobertura_xml_with_namespace(self):
+        cobertura_xml = '''<?xml version="1.0" encoding="utf-8"?>
+<coverage line-rate="0.85" branch-rate="0.75" version="1.9" xmlns="http://cobertura.sourceforge.net/xml/coverage-04.dtd">
+  <packages>
+    <package name="OrderService">
+      <classes>
+        <class name="OrderService.Order" filename="Order.cs" line-rate="0.85">
+          <lines>
+            <line number="10" hits="5" />
+            <line number="11" hits="0" />
+          </lines>
+        </class>
+      </classes>
+    </package>
+  </packages>
+</coverage>'''
+        cov_file = self.project / "coverage.cobertura.xml"
+        cov_file.write_text(cobertura_xml)
+        engine = QualityMetricsEngine(str(self.project))
+        self.assertIn("OrderService.Order", engine.class_coverage)
+        self.assertEqual(engine.class_coverage["OrderService.Order"]["rate"], 0.85)
+
+    def test_obj_substring_in_directory_name_not_pruned(self):
+        from stability_store import StabilityStore
+        obj_dir = self.project / "my-object-service"
+        obj_dir.mkdir()
+        (obj_dir / "Model.cs").write_text("class Model {}")
+
+        # Actual build obj directory should be pruned
+        build_obj = self.project / "obj"
+        build_obj.mkdir()
+        (build_obj / "Generated.cs").write_text("class Generated {}")
+
+        store = StabilityStore(str(self.project))
+        files = store._get_relevant_files()
+        file_names = [Path(f).name for f in files]
+        self.assertIn("Model.cs", file_names)
+        self.assertNotIn("Generated.cs", file_names)
+
 
 if __name__ == "__main__":
     unittest.main()
+
