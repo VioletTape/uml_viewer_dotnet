@@ -347,6 +347,67 @@ environments:
         self.assertEqual(graph["edges"][0]["from"], "cls1")
         self.assertEqual(graph["edges"][0]["to"], "cls2")
 
+    def test_step3_metrics_and_policy_optimizations(self):
+        # 1. Test QualityMetricsEngine complexity and file_coverage index
+        cs_file = self.project / "ComplexService.cs"
+        cs_content = """
+public class ComplexService {
+    public int Process(int x) {
+        // Comment with if and while keywords
+        /* Multi-line comment
+           catch (Exception) {} */
+        string str = "literal if && || ??";
+        if (x > 0 && x < 100 || x == -1) {
+            while (x < 10) x++;
+            for (int i = 0; i < 5; i++) {}
+            foreach (var item in new int[] {1}) {}
+        }
+        try {
+            int val = x ?? 0;
+            return val > 5 ? 1 : 0;
+        } catch (Exception) {
+            return -1;
+        }
+    }
+}
+"""
+        cs_file.write_text(cs_content)
+        engine = QualityMetricsEngine(str(self.project))
+        comp = engine.calculate_method_complexity(str(cs_file), 3, 20)
+        # Expected complexity:
+        # Base: 1
+        # if (1), && (1), || (1) -> +3
+        # while (1) -> +1
+        # for (1) -> +1
+        # foreach (1) -> +1
+        # ?? (1) -> +1
+        # ? : (1) -> +1
+        # catch (1) -> +1
+        # Total = 1 + 3 + 1 + 1 + 1 + 1 + 1 + 1 = 10
+        self.assertEqual(comp, 10)
+
+        # 2. Test ArchitecturePolicy precompiled layer and cycle tagging
+        policy = ArchitecturePolicy()
+        self.assertEqual(policy.assign_layer("MyApp.Domain.Orders"), "Domain")
+        self.assertEqual(policy.assign_layer("MyApp.Infrastructure.Data"), "Infrastructure")
+
+        graph_data = {
+            "project_path": str(self.project),
+            "classes": [
+                {"id": "c1", "name": "Order", "namespace": "MyApp.Domain.Orders", "file_path": "Order.cs"},
+                {"id": "c2", "name": "Repo", "namespace": "MyApp.Infrastructure.Data", "file_path": "Repo.cs"}
+            ],
+            "edges": [
+                {"from": "c1", "to": "c2", "kind": "dependency"},
+                {"from": "c2", "to": "c1", "kind": "dependency"}
+            ]
+        }
+        res = policy.evaluate_graph(graph_data)
+        cycle_edges = [e for e in res["edges"] if e.get("is_cycle")]
+        self.assertEqual(len(cycle_edges), 2)
+        cycle_violations = [v for v in res["violations"] if v.get("category") == "cycle"]
+        self.assertEqual(len(cycle_violations), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

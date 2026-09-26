@@ -16,6 +16,13 @@ import re
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional, Tuple
 
+_RE_LINE_COMMENT = re.compile(r"//.*")
+_RE_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", flags=re.DOTALL)
+_RE_VERBATIM_STR = re.compile(r'@"([^"]|"")*"')
+_RE_REGULAR_STR = re.compile(r'"([^"\\]|\\.)*"')
+_RE_CONTROL_FLOW = re.compile(r"\b(?:if|while|for|foreach|case|catch)\b")
+_RE_TERNARY = re.compile(r"(?<!\?)\?(?!\.|\?|:)")
+
 
 class QualityMetricsEngine:
     def __init__(self, project_path: str, coverage_file: Optional[str] = None):
@@ -29,6 +36,8 @@ class QualityMetricsEngine:
 
         # line coverage: (normalized_file_path, line_number) -> hit_count
         self.line_coverage: Dict[Tuple[str, int], int] = {}
+        # file coverage: normalized_file_path -> {line_number: hit_count} for O(1) file/method queries
+        self.file_coverage: Dict[str, Dict[int, int]] = {}
         # class coverage: class_name -> {"covered": int, "total": int, "rate": float}
         self.class_coverage: Dict[str, Dict] = {}
         # cached file contents to avoid re-reading files repeatedly
@@ -158,8 +167,12 @@ class QualityMetricsEngine:
                         valid_lines += 1
                         if hits > 0:
                             covered_lines += 1
-                        norm_key = (self._norm_path(abs_f_path), num)
+                        norm_p = self._norm_path(abs_f_path)
+                        norm_key = (norm_p, num)
                         self.line_coverage[norm_key] = self.line_coverage.get(norm_key, 0) + hits
+                        if norm_p not in self.file_coverage:
+                            self.file_coverage[norm_p] = {}
+                        self.file_coverage[norm_p][num] = self.file_coverage[norm_p].get(num, 0) + hits
                     except ValueError:
                         pass
 
@@ -221,32 +234,27 @@ class QualityMetricsEngine:
         code = "".join(method_lines)
 
         # 1. Remove comments
-        code = re.sub(r"//.*", "", code)
-        code = re.sub(r"/\*.*?\*/", "", code, flags=re.DOTALL)
+        code = _RE_LINE_COMMENT.sub("", code)
+        code = _RE_BLOCK_COMMENT.sub("", code)
 
         # 2. Remove string literals to avoid counting keywords in strings
-        code = re.sub(r'@"([^"]|"")*"', '""', code)
-        code = re.sub(r'"([^"\\]|\\.)*"', '""', code)
+        code = _RE_VERBATIM_STR.sub('""', code)
+        code = _RE_REGULAR_STR.sub('""', code)
 
         complexity = 1
 
-        # Control flow keywords
-        complexity += len(re.findall(r"\bif\b", code))
-        complexity += len(re.findall(r"\bwhile\b", code))
-        complexity += len(re.findall(r"\bfor\b", code))
-        complexity += len(re.findall(r"\bforeach\b", code))
-        complexity += len(re.findall(r"\bcase\b", code))
-        complexity += len(re.findall(r"\bcatch\b", code))
+        # Control flow keywords (single scan)
+        complexity += len(_RE_CONTROL_FLOW.findall(code))
 
-        # Boolean and conditional operators
-        complexity += len(re.findall(r"&&", code))
-        complexity += len(re.findall(r"\|\|", code))
-        complexity += len(re.findall(r"\?\?", code))
+        # Boolean and conditional operators (fast C-level string counting)
+        complexity += code.count("&&")
+        complexity += code.count("||")
+        complexity += code.count("??")
         # Ternary operator (? not followed by . or ?)
-        complexity += len(re.findall(r"(?<!\?)\?(?!\.|\?|:)", code))
+        complexity += len(_RE_TERNARY.findall(code))
         # Switch expression arms (=>)
         if "switch" in code:
-            complexity += max(0, len(re.findall(r"=>", code)) - 1)
+            complexity += max(0, code.count("=>") - 1)
 
         return complexity
 
@@ -289,10 +297,15 @@ class QualityMetricsEngine:
 
             if not class_cov_rate:
                 norm_p = self._norm_path(abs_path)
-                file_lines = [h for (p, l), h in self.line_coverage.items() if p == norm_p]
+                file_lines = self.file_coverage.get(norm_p)
                 if file_lines:
-                    cov_cnt = sum(1 for h in file_lines if h > 0)
+                    cov_cnt = sum(1 for h in file_lines.values() if h > 0)
                     class_cov_rate = cov_cnt / len(file_lines)
+                elif self.line_coverage:
+                    legacy_lines = [h for (p, l), h in self.line_coverage.items() if p == norm_p]
+                    if legacy_lines:
+                        cov_cnt = sum(1 for h in legacy_lines if h > 0)
+                        class_cov_rate = cov_cnt / len(legacy_lines)
 
             total_comp = 0
             max_crap = 0.0
@@ -308,12 +321,19 @@ class QualityMetricsEngine:
 
                 # Method coverage (fallback to class coverage if line-specific not available)
                 m_cov_rate = class_cov_rate
-                # Check line coverage if available
+                # Check line coverage if available via O(1) file_coverage dictionary
                 norm_p = self._norm_path(abs_path)
-                m_lines = [self.line_coverage.get((norm_p, l)) for l in range(s_line, e_line + 1) if (norm_p, l) in self.line_coverage]
-                if m_lines:
-                    covered_l = sum(1 for h in m_lines if h > 0)
-                    m_cov_rate = covered_l / len(m_lines)
+                file_lines = self.file_coverage.get(norm_p)
+                if file_lines:
+                    m_hits = [file_lines[l] for l in range(s_line, e_line + 1) if l in file_lines]
+                    if m_hits:
+                        covered_l = sum(1 for h in m_hits if h > 0)
+                        m_cov_rate = covered_l / len(m_hits)
+                elif self.line_coverage:
+                    m_lines = [self.line_coverage.get((norm_p, l)) for l in range(s_line, e_line + 1) if (norm_p, l) in self.line_coverage]
+                    if m_lines:
+                        covered_l = sum(1 for h in m_lines if h > 0)
+                        m_cov_rate = covered_l / len(m_lines)
 
                 crap = self.calculate_crap(comp, m_cov_rate)
                 risk = self.get_crap_risk_level(crap)

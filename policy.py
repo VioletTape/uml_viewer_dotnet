@@ -8,10 +8,13 @@ Enforces:
   5. Configurable Allowed / Forbidden Dependency Whitelists & Blacklists.
 """
 
+from collections import defaultdict
 import json
 import os
 import re
 from typing import Dict, List, Optional, Set, Tuple
+
+from path_utils import is_test_path
 
 
 class ArchitecturePolicy:
@@ -24,6 +27,19 @@ class ArchitecturePolicy:
         self.forbidden_deps = self.data.get("forbidden_dependencies", {})
         self.forbidden_external = self.data.get("forbidden_external", self._default_forbidden_external())
         self.strict_completeness = self.data.get("strict_completeness", False)
+        self.enable_stability_rules = self.data.get("enable_stability_rules", True)
+
+        # Precompile layer regex patterns for fast matching
+        self._compiled_layers: List[Tuple[Optional[re.Pattern], str]] = [
+            (re.compile(l["pattern"]) if l.get("pattern") else None, l["name"])
+            for l in self.layers
+        ]
+
+        # Precompile forbidden external regex patterns
+        self._compiled_forbidden_external: Dict[str, List[Tuple[str, re.Pattern]]] = {
+            layer: [(p, re.compile(p)) for p in patterns]
+            for layer, patterns in self.forbidden_external.items()
+        }
 
     @classmethod
     def load_from_file(cls, path: str) -> "ArchitecturePolicy":
@@ -102,10 +118,11 @@ class ArchitecturePolicy:
 
     def assign_layer(self, namespace: str) -> Optional[str]:
         """Maps a namespace to a configured architectural layer."""
-        for layer in self.layers:
-            pattern = layer.get("pattern")
-            if pattern and re.search(pattern, namespace):
-                return layer["name"]
+        if not namespace:
+            return None
+        for compiled_pattern, layer_name in self._compiled_layers:
+            if compiled_pattern and compiled_pattern.search(namespace):
+                return layer_name
         return None
 
     def validate_dependency(self, from_layer: Optional[str], to_layer: Optional[str]) -> Tuple[bool, Optional[str]]:
@@ -151,15 +168,15 @@ class ArchitecturePolicy:
         """
         Checks if an internal class in a protected layer (e.g. Domain) references forbidden external frameworks.
         """
-        forbidden_rules = self.forbidden_external.get(layer, [])
+        forbidden_rules = self._compiled_forbidden_external.get(layer, [])
         if not forbidden_rules:
             return []
 
         violations = []
         ext_refs = class_node.get("external_refs", [])
         for ref in ext_refs:
-            for pattern in forbidden_rules:
-                if pattern == ref or re.search(pattern, ref):
+            for raw_pattern, compiled_pattern in forbidden_rules:
+                if raw_pattern == ref or compiled_pattern.search(ref):
                     violations.append({
                         "category": "framework_taint",
                         "severity": "error",
@@ -230,6 +247,7 @@ class ArchitecturePolicy:
         """
         classes = graph_data.get("classes", [])
         edges = graph_data.get("edges", [])
+        proj_path = graph_data.get("project_path")
 
         # What-If Proposal parameters
         layer_overrides = proposal.get("layer_overrides", {}) if proposal else {}
@@ -256,7 +274,8 @@ class ArchitecturePolicy:
                 c["is_proposed"] = False
             class_by_id[c["id"]] = c
             if not layer:
-                unassigned_classes.append(c)
+                if not is_test_path(c.get("file_path"), proj_path):
+                    unassigned_classes.append(c)
 
         violations = []
         enriched_edges = []
@@ -288,6 +307,9 @@ class ArchitecturePolicy:
             tgt_layer = tgt.get("layer") if tgt else None
 
             is_valid, reason = self.validate_dependency(src_layer, tgt_layer)
+            if src and is_test_path(src.get("file_path"), proj_path):
+                is_valid = True
+                reason = None
 
             edge_copy = dict(e)
             edge_copy["from_class"] = src["name"] if src else "Unknown"
@@ -321,9 +343,10 @@ class ArchitecturePolicy:
 
         # Append proposed edges if any
         if proposal:
+            class_by_id_or_name = {**{c["name"]: c for c in classes if "name" in c}, **class_by_id}
             for pe in proposal.get("proposed_edges", []):
-                src_c = next((c for c in classes if c["name"] == pe.get("from") or c["id"] == pe.get("from")), None)
-                tgt_c = next((c for c in classes if c["name"] == pe.get("to") or c["id"] == pe.get("to")), None)
+                src_c = class_by_id_or_name.get(pe.get("from"))
+                tgt_c = class_by_id_or_name.get(pe.get("to"))
                 if src_c and tgt_c:
                     src_layer = src_c.get("layer")
                     tgt_layer = tgt_c.get("layer")
@@ -348,24 +371,32 @@ class ArchitecturePolicy:
 
         # 2. Framework Isolation validation (Domain cannot touch frameworks)
         for c in classes:
+            if is_test_path(c.get("file_path"), proj_path):
+                continue
             layer = c.get("layer")
             if layer:
                 taint_violations = self.check_framework_isolation(c, layer)
                 violations.extend(taint_violations)
 
         # 3. Acyclic Dependencies Principle (ADP - Cycle detection)
+        edges_by_endpoints: Dict[Tuple[str, str], List[Dict]] = defaultdict(list)
+        for ee in enriched_edges:
+            edges_by_endpoints[(ee["from"], ee["to"])].append(ee)
+
         cycles = self.detect_dependency_cycles(classes, enriched_edges)
         for cycle in cycles:
             cycle_names = [class_by_id.get(cid, {}).get("name", cid) for cid in cycle]
             cycle_str = " -> ".join(cycle_names)
             first_class = class_by_id.get(cycle[0], {})
 
-            # Mark edges involved in cycle
+            if is_test_path(first_class.get("file_path"), proj_path):
+                continue
+
+            # Mark edges involved in cycle using O(1) indexed endpoint lookup
             for i in range(len(cycle) - 1):
                 u, v = cycle[i], cycle[i + 1]
-                for ee in enriched_edges:
-                    if ee["from"] == u and ee["to"] == v:
-                        ee["is_cycle"] = True
+                for ee in edges_by_endpoints.get((u, v), []):
+                    ee["is_cycle"] = True
 
             violations.append({
                 "category": "cycle",
@@ -398,6 +429,20 @@ class ArchitecturePolicy:
                 "file_path": uc.get("file_path"),
                 "line": uc.get("start_line", 1)
             })
+
+        # 5. Stability Patterns validation (Michael Nygard / Polly resilience rules)
+        if self.enable_stability_rules:
+            try:
+                from stability_analyzer import StabilityAnalyzer
+                if proj_path and os.path.isdir(proj_path):
+                    analyzer = StabilityAnalyzer(proj_path)
+                    stability_findings = analyzer.evaluate_project_stability(classes)
+                    violations.extend(stability_findings)
+            except Exception as e:
+                print(f"[Policy] Stability evaluation skipped: {e}")
+
+        # Exclude any violations located in test folders (test, tests, *.Tests, etc.)
+        violations = [v for v in violations if not is_test_path(v.get("file_path"), proj_path)]
 
         # Summary statistics
         layers_summary = {}
