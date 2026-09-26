@@ -27,6 +27,7 @@ from policy import ArchitecturePolicy
 from metrics import QualityMetricsEngine
 from headless_agent import HeadlessAgentWorker
 from mailbox_store import mailbox
+from path_utils import auto_detect_prefix
 
 DEFAULT_PORT = 5050
 
@@ -306,8 +307,12 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
         return True
 
     def _source_path(self, file_path):
+        if not file_path:
+            return None
+        clean_path = str(file_path).replace("\\", "/")
         root = Path(self.project_path).resolve()
-        path = (root / file_path).resolve()
+        p = Path(clean_path)
+        path = p.resolve() if p.is_absolute() else (root / clean_path).resolve()
         try:
             relative = path.relative_to(root)
         except ValueError:
@@ -744,57 +749,6 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
 
 
-def auto_detect_prefix(project_path: str) -> str:
-    """Attempts to auto-detect root namespace prefix for a .NET project."""
-    project_path = os.path.abspath(project_path)
-    if not os.path.isdir(project_path):
-        return ""
-
-    # 1. Scan for .csproj files
-    csproj_names = []
-    for root, dirs, files in os.walk(project_path):
-        dirs[:] = [d for d in dirs if d not in ("bin", "obj", ".git", "node_modules", ".vs", "TestResults")]
-        for f in files:
-            if f.endswith(".csproj") and not ("Test" in f or "test" in f):
-                csproj_names.append(os.path.splitext(f)[0])
-
-    if csproj_names:
-        parts_list = [name.split(".") for name in csproj_names]
-        if len(parts_list) == 1:
-            return parts_list[0][0]
-        common_parts = []
-        for i, part in enumerate(parts_list[0]):
-            if all(len(p) > i and p[i] == part for p in parts_list):
-                common_parts.append(part)
-            else:
-                break
-        if common_parts:
-            return ".".join(common_parts)
-
-    # 2. Scan for .sln
-    sln_files = [f for f in os.listdir(project_path) if f.endswith(".sln")]
-    if sln_files:
-        return os.path.splitext(sln_files[0])[0]
-
-    # 3. Check SQLite db if exists
-    db_path = os.path.join(project_path, ".codegraph", "codegraph.db")
-    if os.path.isfile(db_path):
-        try:
-            import sqlite3
-            from collections import Counter
-            conn = sqlite3.connect(db_path)
-            cur = conn.cursor()
-            cur.execute("SELECT namespace FROM symbols WHERE kind='class' AND namespace != '' LIMIT 100")
-            rows = [r[0] for r in cur.fetchall() if r[0]]
-            conn.close()
-            if rows:
-                top_levels = [r.split(".")[0] for r in rows if not r.startswith("System") and not r.startswith("Microsoft")]
-                if top_levels:
-                    return Counter(top_levels).most_common(1)[0][0]
-        except Exception:
-            pass
-
-    return ""
 
 
 def run_server(project_path: str, prefix: str = "", policy_path: str = "", port: int = DEFAULT_PORT):

@@ -18,6 +18,7 @@ from headless_agent import HeadlessAgentWorker
 from mailbox_store import mailbox
 from metrics import QualityMetricsEngine
 from policy import ArchitecturePolicy
+from path_utils import auto_detect_prefix, is_test_path
 from server import ArchitectureHandler, run_server
 import uml_cli
 
@@ -560,6 +561,51 @@ public class ComplexService {
         with mailbox(str(self.project), "tasks.json", read_only=True) as tasks:
             orphaned = next(x for x in tasks if x["id"] == "task-orphan-1")
             self.assertEqual(orphaned.get("status"), "pending")
+
+    def test_step7_dry_portability_and_polish(self):
+        # 1. auto_detect_prefix consolidation and discovery
+        proj_dir = self.root / "detect_test"
+        proj_dir.mkdir()
+        (proj_dir / "Billing.Domain.csproj").write_text("<Project/>")
+        (proj_dir / "Billing.Api.csproj").write_text("<Project/>")
+        (proj_dir / "Billing.Tests.csproj").write_text("<Project/>")
+        # Ensure it works when called directly or through uml_cli
+        detected = auto_detect_prefix(str(proj_dir))
+        self.assertEqual(detected, "Billing")
+        self.assertEqual(uml_cli.auto_detect_prefix(str(proj_dir)), "Billing")
+
+        # 2. is_test_path LRU caching
+        is_test_path.cache_clear()
+        self.assertTrue(is_test_path("src/Billing.Tests/UnitTests.cs"))
+        info1 = is_test_path.cache_info()
+        self.assertEqual(info1.hits, 0)
+        self.assertTrue(is_test_path("src/Billing.Tests/UnitTests.cs"))
+        info2 = is_test_path.cache_info()
+        self.assertEqual(info2.hits, 1)
+
+        # 3. ArchitecturePolicy layer and dependency caches
+        policy = ArchitecturePolicy()
+        self.assertIn("Domain", policy._compiled_forbidden_external)
+        # Check layer caching
+        self.assertEqual(policy.assign_layer("Billing.Domain.Entities"), "Domain")
+        self.assertIn("Billing.Domain.Entities", policy._layer_cache)
+        self.assertEqual(policy._layer_cache["Billing.Domain.Entities"], "Domain")
+        # Check dependency caching
+        valid, _ = policy.validate_dependency("Domain", "Infrastructure")
+        self.assertFalse(valid)
+        self.assertIn(("Domain", "Infrastructure"), policy._dep_cache)
+        self.assertEqual(policy._dep_cache[("Domain", "Infrastructure")][0], False)
+
+        # 4. Windows backslash path normalization in _source_path
+        nested_dir = self.project / "Nested" / "Folder"
+        nested_dir.mkdir(parents=True)
+        cs_file = nested_dir / "WindowsService.cs"
+        cs_file.write_text("class WindowsService {}")
+
+        # Request using Windows backslashes
+        status, _, body = self.request("/api/file?" + urlencode({"path": "Nested\\Folder\\WindowsService.cs"}))
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["content"], "class WindowsService {}")
 
 
 if __name__ == "__main__":

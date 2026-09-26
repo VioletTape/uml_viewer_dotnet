@@ -41,6 +41,10 @@ class ArchitecturePolicy:
             for layer, patterns in self.forbidden_external.items()
         }
 
+        # In-memory caches for layer assignment and dependency validation
+        self._layer_cache: Dict[str, Optional[str]] = {}
+        self._dep_cache: Dict[Tuple[Optional[str], Optional[str]], Tuple[bool, Optional[str]]] = {}
+
     @classmethod
     def load_from_file(cls, path: str) -> "ArchitecturePolicy":
         with open(path, "r", encoding="utf-8") as f:
@@ -120,9 +124,13 @@ class ArchitecturePolicy:
         """Maps a namespace to a configured architectural layer."""
         if not namespace:
             return None
+        if namespace in self._layer_cache:
+            return self._layer_cache[namespace]
         for compiled_pattern, layer_name in self._compiled_layers:
             if compiled_pattern and compiled_pattern.search(namespace):
+                self._layer_cache[namespace] = layer_name
                 return layer_name
+        self._layer_cache[namespace] = None
         return None
 
     def validate_dependency(self, from_layer: Optional[str], to_layer: Optional[str]) -> Tuple[bool, Optional[str]]:
@@ -138,18 +146,28 @@ class ArchitecturePolicy:
             # Same layer dependencies are permitted
             return True, None
 
+        key = (from_layer, to_layer)
+        if key in self._dep_cache:
+            return self._dep_cache[key]
+
         # 1. Check explicit forbidden blacklist first
         if self.forbidden_deps and from_layer in self.forbidden_deps:
             forbidden = self.forbidden_deps[from_layer]
             if to_layer in forbidden:
-                return False, f"Explicit Forbidden Dependency: Layer '{from_layer}' is forbidden from depending on '{to_layer}'"
+                res = (False, f"Explicit Forbidden Dependency: Layer '{from_layer}' is forbidden from depending on '{to_layer}'")
+                self._dep_cache[key] = res
+                return res
 
         # 2. Check explicit whitelist if provided
         if self.allowed_deps and from_layer in self.allowed_deps:
             allowed = self.allowed_deps[from_layer]
             if to_layer in allowed:
-                return True, None
-            return False, f"Layer '{from_layer}' is not allowed to depend on '{to_layer}' (Explicit policy whitelist)"
+                res = (True, None)
+                self._dep_cache[key] = res
+                return res
+            res = (False, f"Layer '{from_layer}' is not allowed to depend on '{to_layer}' (Explicit policy whitelist)")
+            self._dep_cache[key] = res
+            return res
 
         # 3. Apply Robert C. Martin's Dependency Rule:
         # Inner layers (lower rank) cannot depend on Outer layers (higher rank).
@@ -157,12 +175,16 @@ class ArchitecturePolicy:
         to_rank = self.layer_ranks.get(to_layer, 999)
 
         if from_rank < to_rank:
-            return False, (
+            res = (False, (
                 f"Dependency Rule Violation: Inner layer '{from_layer}' (rank {from_rank}) "
                 f"cannot depend on outer layer '{to_layer}' (rank {to_rank})"
-            )
+            ))
+            self._dep_cache[key] = res
+            return res
 
-        return True, None
+        res = (True, None)
+        self._dep_cache[key] = res
+        return res
 
     def check_framework_isolation(self, class_node: Dict, layer: str) -> List[Dict]:
         """

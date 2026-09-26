@@ -24,6 +24,8 @@ import sys
 import time
 from typing import Dict, Optional, Tuple
 
+from path_utils import auto_detect_prefix
+
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 SERVER_PY = os.path.join(APP_DIR, "server.py")
 DAEMON_DIR = os.path.expanduser("~/.uml-viewer")
@@ -106,37 +108,6 @@ def is_port_in_use(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
-def auto_detect_prefix(project_path: str) -> str:
-    """Attempts to auto-detect root namespace prefix for a .NET project."""
-    project_path = os.path.abspath(project_path)
-    if not os.path.isdir(project_path):
-        return ""
-
-    csproj_names = []
-    for root, dirs, files in os.walk(project_path):
-        dirs[:] = [d for d in dirs if d not in ("bin", "obj", ".git", "node_modules", ".vs", "TestResults")]
-        for f in files:
-            if f.endswith(".csproj") and not ("Test" in f or "test" in f):
-                csproj_names.append(os.path.splitext(f)[0])
-
-    if csproj_names:
-        parts_list = [name.split(".") for name in csproj_names]
-        if len(parts_list) == 1:
-            return parts_list[0][0]
-        common_parts = []
-        for i, part in enumerate(parts_list[0]):
-            if all(len(p) > i and p[i] == part for p in parts_list):
-                common_parts.append(part)
-            else:
-                break
-        if common_parts:
-            return ".".join(common_parts)
-
-    sln_files = [f for f in os.listdir(project_path) if f.endswith(".sln")]
-    if sln_files:
-        return os.path.splitext(sln_files[0])[0]
-
-    return ""
 
 
 def check_and_build_index(project_path: str):

@@ -18,7 +18,7 @@ This WIP documents the prioritized, step-by-step implementation plan. Each step 
 | **4** | File I/O & Hashing | `stability_store.py`, `stability_analyzer.py` | Full-file SHA256 reads on cache check; unpruned `os.walk` descending into `.git` & `node_modules` | **100x – 500x** cache checks; **10x – 50x** disk scan reduction | **Completed** |
 | **5** | Server-Side Caching | `server.py` | Zero caching on `/api/graph` and `/api/violations`; full extraction & metrics recalculated on every request | Sub-millisecond API responses (vs 2–5s) | **Completed** |
 | **6** | Systems & Concurrency | `server.py`, `uml_cli.py`, `mailbox_store.py`, `headless_agent.py` | 15s SSE sleep causing 3s SIGKILL escalation; double JSON serialization in mailbox; failed tasks marked "completed" | Graceful shutdown, zero serialization waste, reliable task state | **Completed** |
-| **7** | DRY, Portability & Polish | `path_utils.py`, `server.py`, `uml_cli.py`, `policy.py` | Duplicated `auto_detect_prefix`; Windows backslash handling in WSL; unmemoized `is_test_path` and `assign_layer` | Clean modularity, cross-platform WSL/Linux compatibility | In Progress |
+| **7** | DRY, Portability & Polish | `path_utils.py`, `server.py`, `uml_cli.py`, `policy.py` | Duplicated `auto_detect_prefix`; Windows backslash handling in WSL; unmemoized `is_test_path` and `assign_layer` | Clean modularity, cross-platform WSL/Linux compatibility | **Completed** |
 
 ---
 
@@ -77,9 +77,9 @@ This WIP documents the prioritized, step-by-step implementation plan. Each step 
 - [x] Commit Step 6.
 
 ### Step 7: DRY, Portability & Polish
-- [ ] Consolidate `auto_detect_prefix()` into `path_utils.py` and import it in `server.py` and `uml_cli.py`.
-- [ ] Add Windows backslash normalization in `server.py:_source_path`.
-- [ ] Add `@functools.lru_cache` to `is_test_path()` in `path_utils.py` and `assign_layer()` in `policy.py`.
-- [ ] Run full test suite (`python3 -m unittest discover`).
-- [ ] Subagent evaluation of Step 7.
-- [ ] Commit Step 7.
+- [x] Consolidate `auto_detect_prefix()` into `path_utils.py` and import it in `server.py` and `uml_cli.py`.
+- [x] Add Windows backslash normalization in `server.py:_source_path`.
+- [x] Add `@functools.lru_cache` to `is_test_path()` in `path_utils.py` and memoize `assign_layer()` & `validate_dependency()` in `policy.py`.
+- [x] Run full test suite (`python3 -m unittest discover` - 48 tests passing).
+- [x] Subagent evaluation of Step 7 (`71984012` - confirmed READY TO COMMIT).
+- [x] Commit Step 7.
