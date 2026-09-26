@@ -16,8 +16,8 @@ This WIP documents the prioritized, step-by-step implementation plan. Each step 
 | **2** | Database (SQLite) | `extractor.py` | N+1 queries in `_resolve_to_class` (firing up to 30,000 queries per extraction) | **50x – 200x** faster graph extraction | **Completed** |
 | **3** | Algorithmic Complexity | `metrics.py`, `policy.py` | $O(C \times L)$ coverage dict scan; $O(\text{Cycles} \times E)$ cycle edge tagging; 15 uncompiled regexes in method complexity | **100x – 1000x** metrics lookup; **8x – 15x** complexity calc | **Completed** |
 | **4** | File I/O & Hashing | `stability_store.py`, `stability_analyzer.py` | Full-file SHA256 reads on cache check; unpruned `os.walk` descending into `.git` & `node_modules` | **100x – 500x** cache checks; **10x – 50x** disk scan reduction | **Completed** |
-| **5** | Server-Side Caching | `server.py` | Zero caching on `/api/graph` and `/api/violations`; full extraction & metrics recalculated on every request | Sub-millisecond API responses (vs 2–5s) | In Progress |
-| **6** | Systems & Concurrency | `server.py`, `uml_cli.py`, `mailbox_store.py`, `headless_agent.py` | 15s SSE sleep causing 3s SIGKILL escalation; double JSON serialization in mailbox; failed tasks marked "completed" | Graceful shutdown, zero serialization waste, reliable task state | Pending |
+| **5** | Server-Side Caching | `server.py` | Zero caching on `/api/graph` and `/api/violations`; full extraction & metrics recalculated on every request | Sub-millisecond API responses (vs 2–5s) | **Completed** |
+| **6** | Systems & Concurrency | `server.py`, `uml_cli.py`, `mailbox_store.py`, `headless_agent.py` | 15s SSE sleep causing 3s SIGKILL escalation; double JSON serialization in mailbox; failed tasks marked "completed" | Graceful shutdown, zero serialization waste, reliable task state | In Progress |
 | **7** | DRY, Portability & Polish | `path_utils.py`, `server.py`, `uml_cli.py`, `policy.py` | Duplicated `auto_detect_prefix`; Windows backslash handling in WSL; unmemoized `is_test_path` and `assign_layer` | Clean modularity, cross-platform WSL/Linux compatibility | Pending |
 
 ---
@@ -59,12 +59,12 @@ This WIP documents the prioritized, step-by-step implementation plan. Each step 
 - [x] Commit Step 4.
 
 ### Step 5: Server-Side In-Memory Graph Caching
-- [ ] Implement thread-safe `GraphCacheManager` in `server.py` caching extracted, evaluated, and enriched graphs.
-- [ ] Wire `file_watcher_loop` to invalidate the cache when `codegraph.db` or `policy.json` changes.
-- [ ] Serve `GET /api/graph` and `GET /api/violations` from cache.
-- [ ] Run full test suite (`python3 -m unittest discover`).
-- [ ] Subagent evaluation of Step 5.
-- [ ] Commit Step 5.
+- [x] Implement thread-safe `GraphCacheManager` in `server.py` caching extracted, evaluated, and enriched graphs.
+- [x] Wire `file_watcher_loop` to invalidate the cache when `codegraph.db` or `policy.json` changes.
+- [x] Serve `GET /api/graph` and `GET /api/violations` from cache.
+- [x] Run full test suite (`python3 -m unittest discover` - 46 tests passing).
+- [x] Subagent evaluation of Step 5 (`aae6e36a` - confirmed READY TO COMMIT).
+- [x] Commit Step 5.
 
 ### Step 6: Systems, Concurrency & Lifecycle Hardening
 - [ ] Set `ThreadingHTTPServer.daemon_threads = True` and broadcast `None` sentinel on server shutdown to unblock SSE worker threads immediately and avoid 3-second SIGKILL escalation in `uml_cli.py`.

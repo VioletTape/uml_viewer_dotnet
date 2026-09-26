@@ -20,7 +20,7 @@ import time
 import urllib.parse
 import uuid
 from pathlib import Path
-from typing import Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from extractor import CodeGraphExtractor
 from policy import ArchitecturePolicy
@@ -93,6 +93,133 @@ def notify_all(event_data: Dict):
                 pass
 
 
+
+class GraphCacheManager:
+    """Thread-safe in-memory cache for extracted graphs, evaluations, and metrics."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._cache_key: Optional[Tuple[str, str, str]] = None
+        self._db_mtime: float = 0.0
+        self._policy_mtime: float = 0.0
+        self._raw_graph: Optional[Dict[str, Any]] = None
+        self._base_evaluated: Optional[Dict[str, Any]] = None
+        self._base_enriched_json: Optional[bytes] = None
+        self._base_violations_json: Optional[bytes] = None
+        self._proposal_cache: Dict[str, bytes] = {}
+
+    def invalidate(self):
+        """Explicitly clear all cached graph data."""
+        with self._lock:
+            self._cache_key = None
+            self._raw_graph = None
+            self._base_evaluated = None
+            self._base_enriched_json = None
+            self._base_violations_json = None
+            self._proposal_cache.clear()
+
+    @staticmethod
+    def _safe_mtime(path: str) -> float:
+        try:
+            return os.path.getmtime(path) if path and os.path.isfile(path) else 0.0
+        except Exception:
+            return 0.0
+
+    def _sync_mtimes_locked(self, project_path: str, prefix: str, policy_path: str) -> bool:
+        """
+        Checks if project_path/prefix/policy_path or on-disk mtimes have changed.
+        Returns True if cache was invalidated.
+        Must be called while holding self._lock.
+        """
+        current_key = (project_path, prefix, policy_path)
+        db_path = os.path.join(project_path, ".codegraph", "codegraph.db")
+        wal_path = os.path.join(project_path, ".codegraph", "codegraph.db-wal")
+        current_db_mtime = max(self._safe_mtime(db_path), self._safe_mtime(wal_path))
+        current_policy_mtime = self._safe_mtime(policy_path)
+
+        if self._cache_key != current_key or self._db_mtime != current_db_mtime:
+            self._cache_key = current_key
+            self._db_mtime = current_db_mtime
+            self._policy_mtime = current_policy_mtime
+            self._raw_graph = None
+            self._base_evaluated = None
+            self._base_enriched_json = None
+            self._base_violations_json = None
+            self._proposal_cache.clear()
+            return True
+        elif self._policy_mtime != current_policy_mtime:
+            self._policy_mtime = current_policy_mtime
+            self._base_evaluated = None
+            self._base_enriched_json = None
+            self._base_violations_json = None
+            self._proposal_cache.clear()
+            return True
+        return False
+
+    def get_enriched_graph_json(
+        self,
+        project_path: str,
+        prefix: str,
+        policy_path: str,
+        policy: ArchitecturePolicy,
+        proposal: Optional[Dict] = None
+    ) -> bytes:
+        """Returns JSON bytes for the enriched graph (base or proposal-modified)."""
+        prop_id = proposal.get("id") if proposal else ""
+        with self._lock:
+            self._sync_mtimes_locked(project_path, prefix, policy_path)
+
+            if not prop_id and self._base_enriched_json is not None:
+                return self._base_enriched_json
+            if prop_id and prop_id in self._proposal_cache:
+                return self._proposal_cache[prop_id]
+
+            if self._raw_graph is None:
+                ext = CodeGraphExtractor(project_path, prefix=prefix)
+                self._raw_graph = ext.extract()
+
+            if not prop_id:
+                if self._base_evaluated is None:
+                    self._base_evaluated = policy.evaluate_graph(self._raw_graph, proposal=None)
+                if self._base_enriched_json is None:
+                    metrics_engine = QualityMetricsEngine(project_path)
+                    enriched = metrics_engine.enrich_graph_with_metrics(self._base_evaluated)
+                    self._base_enriched_json = json.dumps(enriched, indent=2).encode("utf-8")
+                    self._base_violations_json = json.dumps(self._base_evaluated.get("violations", []), indent=2).encode("utf-8")
+                return self._base_enriched_json
+            else:
+                evaluated = policy.evaluate_graph(self._raw_graph, proposal=proposal)
+                metrics_engine = QualityMetricsEngine(project_path)
+                enriched = metrics_engine.enrich_graph_with_metrics(evaluated)
+                prop_json = json.dumps(enriched, indent=2).encode("utf-8")
+                self._proposal_cache[prop_id] = prop_json
+                return prop_json
+
+    def get_violations_json(
+        self,
+        project_path: str,
+        prefix: str,
+        policy_path: str,
+        policy: ArchitecturePolicy
+    ) -> bytes:
+        """Returns JSON bytes for the list of violations."""
+        with self._lock:
+            self._sync_mtimes_locked(project_path, prefix, policy_path)
+
+            if self._base_violations_json is not None:
+                return self._base_violations_json
+
+            if self._raw_graph is None:
+                ext = CodeGraphExtractor(project_path, prefix=prefix)
+                self._raw_graph = ext.extract()
+
+            if self._base_evaluated is None:
+                self._base_evaluated = policy.evaluate_graph(self._raw_graph, proposal=None)
+
+            self._base_violations_json = json.dumps(self._base_evaluated.get("violations", []), indent=2).encode("utf-8")
+            return self._base_violations_json
+
+
 def file_watcher_loop(project_path: str, policy_path: str):
     """Background thread watching .codegraph/codegraph.db and policy.json for changes."""
     db_path = os.path.join(project_path, ".codegraph", "codegraph.db")
@@ -136,6 +263,7 @@ def file_watcher_loop(project_path: str, policy_path: str):
                 if p:
                     last_mtimes[p] = get_mtime(p)
             print(f"[LiveSync] Detected change in {changed_file}. Pushing reload to connected browsers...")
+            ArchitectureHandler.graph_cache.invalidate()
             notify_all({"type": "reload", "reason": f"Change detected in {changed_file}"})
 
 
@@ -144,6 +272,7 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
     prefix = ""
     policy_path = ""
     agent_worker: Optional[HeadlessAgentWorker] = None
+    graph_cache = GraphCacheManager()
 
     def __init__(self, *args, **kwargs):
         frontend_dir = os.path.join(os.path.dirname(__file__), "frontend")
@@ -212,6 +341,7 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/api/reload":
             print("[LiveSync] Manual reload triggered via POST /api/reload")
+            self.graph_cache.invalidate()
             notify_all({"type": "reload", "reason": "Manual API trigger"})
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -225,6 +355,8 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_resolve_agent_task()
         elif parsed.path == "/api/agent/proposals":
             self._handle_post_proposal()
+        elif parsed.path == "/api/stability/recheck":
+            self._handle_stability_recheck()
         else:
             self.send_response(404)
             self.end_headers()
@@ -445,12 +577,50 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
                 else:
                     proposals.append(prop)
 
+            self.graph_cache.invalidate()
             notify_all({"type": "proposals_updated", "proposal": prop})
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"status": "ok", "proposal": prop}).encode("utf-8"))
+        except Exception as e:
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+
+    def _handle_stability_recheck(self):
+        try:
+            from stability_analyzer import StabilityAnalyzer
+            from stability_store import StabilityStore
+
+            StabilityStore(self.project_path).invalidate_cache()
+            self.graph_cache.invalidate()
+            analyzer = StabilityAnalyzer(self.project_path)
+
+            prefix = getattr(self, "prefix", "") or ""
+            classes = []
+            try:
+                ext = CodeGraphExtractor(self.project_path, prefix=prefix)
+                raw_graph = ext.extract()
+                classes = raw_graph.get("classes", [])
+            except Exception:
+                pass
+
+            findings = analyzer.evaluate_project_stability(classes, force_recheck=True)
+
+            notify_all({"type": "reload", "reason": "Stability recheck complete", "findings_count": len(findings)})
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "status": "ok",
+                "message": "Stability recheck complete",
+                "findings_count": len(findings),
+                "findings": findings
+            }).encode("utf-8"))
         except Exception as e:
             self.send_response(500)
             self.send_header("Content-Type", "application/json")
@@ -470,20 +640,19 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
                 proposals = self._get_proposals()
                 selected_proposal = next((p for p in proposals if p.get("id") == proposal_id), None)
 
-            ext = CodeGraphExtractor(self.project_path, prefix=self.prefix)
-            raw_graph = ext.extract()
-
             policy = self._load_policy()
-
-            evaluated = policy.evaluate_graph(raw_graph, proposal=selected_proposal)
-
-            metrics_engine = QualityMetricsEngine(self.project_path)
-            enriched = metrics_engine.enrich_graph_with_metrics(evaluated)
+            graph_json_bytes = self.graph_cache.get_enriched_graph_json(
+                self.project_path,
+                self.prefix,
+                self.policy_path,
+                policy,
+                proposal=selected_proposal
+            )
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps(enriched, indent=2).encode("utf-8"))
+            self.wfile.write(graph_json_bytes)
         except Exception as e:
             self.send_response(500)
             self.send_header("Content-Type", "application/json")
@@ -492,15 +661,18 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
 
     def _handle_get_violations(self):
         try:
-            ext = CodeGraphExtractor(self.project_path, prefix=self.prefix)
-            raw_graph = ext.extract()
             policy = self._load_policy()
-            evaluated = policy.evaluate_graph(raw_graph)
+            violations_json_bytes = self.graph_cache.get_violations_json(
+                self.project_path,
+                self.prefix,
+                self.policy_path,
+                policy
+            )
 
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps(evaluated.get("violations", []), indent=2).encode("utf-8"))
+            self.wfile.write(violations_json_bytes)
         except Exception as e:
             self.send_response(500)
             self.send_header("Content-Type", "application/json")

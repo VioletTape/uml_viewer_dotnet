@@ -450,6 +450,39 @@ public class ComplexService {
         self.assertNotIn("GitFake", finding_classes)
         self.assertNotIn("BinFake", finding_classes)
 
+    def test_step5_server_graph_cache_in_memory(self):
+        graph = {
+            "classes": [{"id": "c1", "name": "Order", "namespace": "Shop.Domain", "members": [], "file_path": "Order.cs"}],
+            "edges": []
+        }
+        with patch("server.CodeGraphExtractor") as extractor_mock:
+            extractor_mock.return_value.extract.side_effect = lambda: copy.deepcopy(graph)
+
+            # 1. First call to /api/graph -> extracts graph from DB
+            status1, _, body1 = self.request("/api/graph")
+            self.assertEqual(status1, 200)
+            self.assertEqual(extractor_mock.return_value.extract.call_count, 1)
+
+            # 2. Second call to /api/graph -> served from cache, zero DB extraction
+            status2, _, body2 = self.request("/api/graph")
+            self.assertEqual(status2, 200)
+            self.assertEqual(body1, body2)
+            self.assertEqual(extractor_mock.return_value.extract.call_count, 1)
+
+            # 3. Call to /api/violations -> served from evaluated graph cache, zero DB extraction
+            status_v, _, body_v = self.request("/api/violations")
+            self.assertEqual(status_v, 200)
+            self.assertEqual(extractor_mock.return_value.extract.call_count, 1)
+
+            # 4. Invalidate cache via POST /api/reload
+            status_r, _, _ = self.request("/api/reload", body={})
+            self.assertEqual(status_r, 200)
+
+            # 5. Subsequent call to /api/graph -> triggers re-extraction
+            status3, _, body3 = self.request("/api/graph")
+            self.assertEqual(status3, 200)
+            self.assertEqual(extractor_mock.return_value.extract.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
