@@ -184,6 +184,36 @@ class TestRoslynStabilityAnalyzer(unittest.TestCase):
         self.assertIn("default_timeout", violation_kinds)
         self.assertIn("catch_all_exception_retry", violation_kinds)
         self.assertIn("unjittered_retry", violation_kinds)
+        self.assertIn("unbounded_boundary_channel", violation_kinds)
+
+        # Verify UnboundedQueueWorker flagged and clean/telemetry classes not flagged
+        unbounded_violations = [v for v in violations if v["class_name"] == "UnboundedQueueWorker"]
+        self.assertEqual(len(unbounded_violations), 3)
+        self.assertTrue(all(v["kind"] == "unbounded_boundary_channel" for v in unbounded_violations))
+
+        # Verify CatalogIngestionWorker is NOT suppressed by telemetry filter (contains "log")
+        catalog_violations = [v for v in violations if v["class_name"] == "CatalogIngestionWorker"]
+        self.assertEqual(len(catalog_violations), 1)
+        self.assertEqual(catalog_violations[0]["severity"], "error")
+
+        # Verify GuardedQueueWorker is downgraded to warning by SemaphoreSlim
+        guarded_violations = [v for v in violations if v["class_name"] == "GuardedQueueWorker"]
+        self.assertEqual(len(guarded_violations), 1)
+        self.assertEqual(guarded_violations[0]["severity"], "warning")
+
+        # Verify ExcessiveCapacityWorker (>50,000) is flagged as warning
+        excess_violations = [v for v in violations if v["class_name"] == "ExcessiveCapacityWorker"]
+        self.assertEqual(len(excess_violations), 1)
+        self.assertEqual(excess_violations[0]["severity"], "warning")
+
+        bounded_violations = [v for v in violations if v["class_name"] == "BoundedQueueWorker"]
+        self.assertEqual(len(bounded_violations), 0)
+
+        telemetry_violations = [v for v in violations if v["class_name"] == "TelemetryBatchSink"]
+        self.assertEqual(len(telemetry_violations), 0)
+
+        local_violations = [v for v in violations if v["class_name"] == "LocalFanOutService"]
+        self.assertEqual(len(local_violations), 0)
 
     def test_scout_suspicious_custom_resilience_loop(self):
         with tempfile.NamedTemporaryFile("w", suffix=".cs", delete=False) as f:
@@ -685,6 +715,102 @@ class TestClassLevelConsolidation(unittest.TestCase):
         self.assertTrue(finding["occurrences"] >= 3)
         self.assertTrue(len(finding["details"]) >= 3)
         self.assertIn("DBAccess", finding["reason"])
+
+    def test_step1_unbounded_channel_and_queue_boundary_checks(self):
+        """Step 1 validation: Unbounded channels and boundary queues in Python fallback and explanation."""
+        analyzer = StabilityAnalyzer(self.project_dir)
+
+        # 1. Unbounded channel field detection in Python fallback
+        unbounded_code = """
+        namespace OrderService.Workers
+        {
+            public class OrderIngestionWorker
+            {
+                private readonly Channel<Order> _orders = Channel.CreateUnbounded<Order>();
+                private readonly ConcurrentQueue<Order> _legacyQueue;
+                private readonly BlockingCollection<Order> _coll = new BlockingCollection<Order>();
+
+                public void Submit(Order order) { }
+            }
+        }
+        """
+        violations = analyzer.analyze_csharp_syntax("OrderIngestionWorker.cs", unbounded_code)
+        unbounded_kinds = [v["kind"] for v in violations if v["kind"] == "unbounded_boundary_channel"]
+        self.assertEqual(len(unbounded_kinds), 3)
+
+        # 2. Telemetry noise suppression in Python fallback
+        telemetry_code = """
+        namespace OrderService.Telemetry
+        {
+            public class TelemetryBatchSink
+            {
+                private readonly Channel<LogEvent> _sink = Channel.CreateUnbounded<LogEvent>();
+            }
+        }
+        """
+        telemetry_violations = analyzer.analyze_csharp_syntax("src/Telemetry/TelemetrySink.cs", telemetry_code)
+        self.assertEqual(len(telemetry_violations), 0)
+
+        # 3. Headless agent explanation generation for unbounded_boundary_channel
+        worker = HeadlessAgentWorker(self.project_dir)
+        violation_dict = {
+            "category": "stability_rule",
+            "kind": "unbounded_boundary_channel",
+            "from_class": "OrderIngestionWorker",
+            "from_layer": "Infrastructure",
+            "reason": "Unbounded channel at architectural boundary creates a buffer without backpressure."
+        }
+        explanation = worker._handle_explain_violation({"target": violation_dict})
+        self.assertIn("Unbounded Channel / Queue at Boundary", explanation)
+        self.assertIn("Channel.CreateBounded", explanation)
+        self.assertIn("Linux cgroup OOM killer", explanation)
+
+        # 4. Headless agent fix proposal generation for unbounded_boundary_channel
+        fix_msg = worker._handle_fix_violation({"target": violation_dict})
+        self.assertIn("Flow Control: Sized Bounded Channel for OrderIngestionWorker", fix_msg)
+
+        # 5. Guarded queue and excessive capacity in Python fallback
+        guarded_code = """
+        public class GuardedWorker
+        {
+            private SemaphoreSlim _sem = new SemaphoreSlim(10);
+            private ConcurrentQueue<string> _items = new ConcurrentQueue<string>();
+        }
+        """
+        guarded_violations = analyzer.analyze_csharp_syntax("GuardedWorker.cs", guarded_code)
+        self.assertEqual(len(guarded_violations), 1)
+        self.assertEqual(guarded_violations[0]["severity"], "warning")
+
+        excess_code = """
+        public class HugeWorker
+        {
+            private Channel<string> _ch = Channel.CreateBounded<string>(75000);
+        }
+        """
+        excess_violations = analyzer.analyze_csharp_syntax("HugeWorker.cs", excess_code)
+        self.assertEqual(len(excess_violations), 1)
+        self.assertEqual(excess_violations[0]["severity"], "warning")
+
+        # 6. Architecture mapping in evaluate_project_stability fallback path
+        with tempfile.NamedTemporaryFile("w", suffix=".cs", dir=self.project_dir, delete=False) as f:
+            f.write(unbounded_code)
+            tmp_cs = f.name
+        try:
+            graph_classes = [{
+                "name": "OrderIngestionWorker",
+                "namespace": "OrderService.Workers",
+                "layer": "Infrastructure",
+                "file_path": tmp_cs,
+                "external_refs": []
+            }]
+            findings = analyzer.evaluate_project_stability(graph_classes, force_recheck=True)
+            boundary_findings = [f for f in findings if f.get("kind") == "unbounded_boundary_channel" or f.get("from_class") == "OrderIngestionWorker"]
+            self.assertTrue(len(boundary_findings) > 0)
+            self.assertEqual(boundary_findings[0]["to_class"], "Boundary Buffer / Queue")
+            self.assertEqual(boundary_findings[0]["to_layer"], "In-Memory Boundary")
+        finally:
+            if os.path.exists(tmp_cs):
+                os.unlink(tmp_cs)
 
 
 if __name__ == "__main__":

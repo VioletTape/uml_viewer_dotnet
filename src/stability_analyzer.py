@@ -250,6 +250,112 @@ class StabilityAnalyzer:
                         )
                     })
 
+        # 5. Detect Unbounded Channels & Boundary Queues (STAB006)
+        norm_path = file_path.replace("\\", "/")
+        is_telemetry = (
+            any(term in norm_path for term in ("/Logging/", "/Telemetry/", "/Metrics/", "/Diagnostics/", "/Serilog/")) or
+            current_class.endswith(("Logger", "Logging", "LogSink", "TelemetrySink", "MetricsSink", "BatchSink")) or
+            "Telemetry" in current_class or "Metric" in current_class
+        )
+        if not is_telemetry:
+            is_guarded = "SemaphoreSlim" in code_content or "RateLimiter" in code_content
+            for idx, line in enumerate(lines, 1):
+                # Channel.CreateUnbounded
+                if "Channel.CreateUnbounded" in line:
+                    is_field = any(modifier in line for modifier in ("private ", "public ", "protected ", "internal ", "readonly ", "static ")) or re.search(r"Channel<[^>]+>\s+[_A-Za-z0-9]+\s*=", line)
+                    if is_field or "AddSingleton" in line or "AddScoped" in line or "AddTransient" in line:
+                        violations.append({
+                            "kind": "unbounded_boundary_channel",
+                            "class_name": current_class,
+                            "file_path": file_path,
+                            "line": idx,
+                            "severity": "warning" if is_guarded else "error",
+                            "message": (
+                                "Unbounded channel at architectural boundary creates a buffer without backpressure. "
+                                "Under downstream latency or stalls, memory grows monotonically until process termination by the Linux cgroup OOM killer. "
+                                "Migrate to Channel.CreateBounded<T>(capacity) with BoundedChannelFullMode.Wait."
+                            )
+                        })
+
+                # Channel.CreateBounded or BoundedChannelOptions with excessive capacity or int.MaxValue
+                if "Channel.CreateBounded" in line or "BoundedChannelOptions" in line:
+                    if "int.MaxValue" in line:
+                        violations.append({
+                            "kind": "unbounded_boundary_channel",
+                            "class_name": current_class,
+                            "file_path": file_path,
+                            "line": idx,
+                            "severity": "error",
+                            "message": (
+                                "Bounded channel configured with int.MaxValue is effectively unbounded, providing no backpressure. "
+                                "Use a sized capacity budgeted against container memory limits."
+                            )
+                        })
+                    else:
+                        cap_match = re.search(r"(?:CreateBounded<[^>]+>|BoundedChannelOptions)\s*\(\s*(\d+)", line)
+                        if cap_match and int(cap_match.group(1)) > 50000:
+                            cap_val = int(cap_match.group(1))
+                            violations.append({
+                                "kind": "unbounded_boundary_channel",
+                                "class_name": current_class,
+                                "file_path": file_path,
+                                "line": idx,
+                                "severity": "warning",
+                                "message": (
+                                    f"Bounded channel capacity ({cap_val:,}) exceeds safe memory envelope for typical container limits (>50,000 items). "
+                                    f"Under latency, retained memory may cause excessive Gen 2 GC pressure or OOM. Tune capacity to expected processing rate and memory budget."
+                                )
+                            })
+
+                # ConcurrentQueue<T> as boundary field
+                if "ConcurrentQueue<" in line:
+                    if not any(p in line for p in ("Pool", "FreeList")):
+                        is_field = any(modifier in line for modifier in ("private ", "public ", "protected ", "internal ", "readonly ")) or re.search(r"ConcurrentQueue<[^>]+>\s+[_A-Za-z0-9]+", line)
+                        if is_field:
+                            violations.append({
+                                "kind": "unbounded_boundary_channel",
+                                "class_name": current_class,
+                                "file_path": file_path,
+                                "line": idx,
+                                "severity": "warning" if is_guarded else "error",
+                                "message": (
+                                    "ConcurrentQueue<T> used as shared boundary state provides no backpressure API. "
+                                    "Under worker lag or downstream stalls, queue depth grows unconstrained, risking Gen 2 GC compaction spikes and Linux OOM-kill. "
+                                    "Migrate to Channel.CreateBounded<T>(capacity) with BoundedChannelFullMode.Wait."
+                                )
+                            })
+
+                # BlockingCollection without capacity or excessive capacity
+                if "BlockingCollection<" in line:
+                    if "int.MaxValue" in line or (("new()" in line or "new BlockingCollection" in line) and not re.search(r"new\s+BlockingCollection<[^>]+>\s*\(\s*\d+\s*\)", line)):
+                        violations.append({
+                            "kind": "unbounded_boundary_channel",
+                            "class_name": current_class,
+                            "file_path": file_path,
+                            "line": idx,
+                            "severity": "warning" if is_guarded else "error",
+                            "message": (
+                                "BlockingCollection<T> instantiated with default unbounded capacity (int.MaxValue). "
+                                "Under worker lag or downstream stalls, queue depth grows unconstrained, risking Gen 2 GC compaction spikes and Linux OOM-kill. "
+                                "Migrate to a bounded capacity (e.g. new BlockingCollection<T>(capacity)) or Channel.CreateBounded<T>(capacity)."
+                            )
+                        })
+                    else:
+                        cap_match = re.search(r"new\s+BlockingCollection<[^>]+>\s*\(\s*(\d+)\s*\)", line)
+                        if cap_match and int(cap_match.group(1)) > 50000:
+                            cap_val = int(cap_match.group(1))
+                            violations.append({
+                                "kind": "unbounded_boundary_channel",
+                                "class_name": current_class,
+                                "file_path": file_path,
+                                "line": idx,
+                                "severity": "warning",
+                                "message": (
+                                    f"BlockingCollection<T> capacity ({cap_val:,}) exceeds safe memory envelope for typical container limits (>50,000 items). "
+                                    f"Under latency, retained memory may cause excessive Gen 2 GC pressure or OOM. Tune capacity to expected processing rate and memory budget."
+                                )
+                            })
+
         return violations
 
     # =========================================================================
@@ -320,15 +426,18 @@ class StabilityAnalyzer:
                     if f"{self.infra.max_replicas} replicas" not in reason:
                         reason += f" (Multi-instance: {self.infra.max_replicas} replicas amplify dogpiling storms when custom retries lack decorrelated jitter)"
 
+                to_class = "Boundary Buffer / Queue" if kind == "unbounded_boundary_channel" else "External Service / Integration Point"
+                to_layer = "In-Memory Boundary" if kind == "unbounded_boundary_channel" else "External Infrastructure"
+
                 all_findings.append({
                     "category": "stability_rule",
                     "severity": severity,
                     "from_class": v.get("class_name") or c_info.get("name", "Unknown"),
                     "from_namespace": c_info.get("namespace", "Unknown"),
                     "from_layer": c_info.get("layer", "Infrastructure"),
-                    "to_class": "External Service / Integration Point",
+                    "to_class": to_class,
                     "to_namespace": "",
-                    "to_layer": "External Infrastructure",
+                    "to_layer": to_layer,
                     "kind": kind,
                     "reason": reason,
                     "file_path": fpath,
@@ -351,9 +460,9 @@ class StabilityAnalyzer:
                             "from_class": v["class_name"] or c_info.get("name", "Unknown"),
                             "from_namespace": c_info.get("namespace", "Unknown"),
                             "from_layer": c_info.get("layer", "Infrastructure"),
-                            "to_class": "External Service / Integration Point",
+                            "to_class": "Boundary Buffer / Queue" if v["kind"] == "unbounded_boundary_channel" else "External Service / Integration Point",
                             "to_namespace": "",
-                            "to_layer": "External Infrastructure",
+                            "to_layer": "In-Memory Boundary" if v["kind"] == "unbounded_boundary_channel" else "External Infrastructure",
                             "kind": v["kind"],
                             "reason": v["message"],
                             "file_path": v["file_path"],
@@ -472,6 +581,11 @@ class StabilityAnalyzer:
                     reason = (
                         f"Class '{cls_name}' has {len(group)} suspicious custom resilience loops (lines {lines_preview}): "
                         f"Hand-rolled retry/timeout wrappers risk threadpool starvation and unobserved background leaks."
+                    )
+                elif primary_kind == "unbounded_boundary_channel":
+                    reason = (
+                        f"Class '{cls_name}' contains {len(group)} unbounded queue/channel boundary buffers (lines {lines_preview}): "
+                        f"Unbounded buffers create memory accumulation risks without backpressure under worker lag or downstream stalls."
                     )
                 else:
                     reason = f"Class '{cls_name}' has {len(group)} stability issues of type '{primary_kind}' (lines {lines_preview})."

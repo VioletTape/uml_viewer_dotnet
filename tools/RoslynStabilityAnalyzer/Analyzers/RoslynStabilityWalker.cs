@@ -201,6 +201,7 @@ public class RoslynStabilityWalker : CSharpSyntaxWalker
     public override void VisitFieldDeclaration(FieldDeclarationSyntax node)
     {
         var typeStr = node.Declaration.Type.ToString();
+        InspectFieldForUnboundedQueue(node);
         var kind = ClassifyIntegrationKind(typeStr);
         if (kind != null)
         {
@@ -224,6 +225,7 @@ public class RoslynStabilityWalker : CSharpSyntaxWalker
     public override void VisitPropertyDeclaration(PropertyDeclarationSyntax node)
     {
         var typeStr = node.Type.ToString();
+        InspectPropertyForUnboundedQueue(node);
         var kind = ClassifyIntegrationKind(typeStr);
         if (kind != null)
         {
@@ -339,6 +341,8 @@ public class RoslynStabilityWalker : CSharpSyntaxWalker
             }
         }
 
+        InspectObjectCreationForUnboundedQueue(node);
+
         base.VisitObjectCreationExpression(node);
     }
 
@@ -372,6 +376,15 @@ public class RoslynStabilityWalker : CSharpSyntaxWalker
                      "WaitAndRetry" or "WaitAndRetryAsync" or "Retry" or "RetryAsync" or "Timeout" or "TimeoutAsync")
             {
                 InspectResilienceCall(node, methodName);
+            }
+            // Inspection: Unbounded or excessively sized Channel buffers
+            else if (methodName == "CreateUnbounded")
+            {
+                InspectChannelCreateUnbounded(node);
+            }
+            else if (methodName == "CreateBounded")
+            {
+                InspectChannelCreateBounded(node);
             }
         }
 
@@ -1189,5 +1202,425 @@ public class RoslynStabilityWalker : CSharpSyntaxWalker
         }
 
         return (false, "");
+    }
+
+    private bool IsTelemetryOrLogging(SyntaxNode node)
+    {
+        var path = _filePath.Replace('\\', '/');
+        if (path.Contains("/Logging/", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("/Telemetry/", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("/Metrics/", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("/Diagnostics/", StringComparison.OrdinalIgnoreCase) ||
+            path.Contains("/Serilog/", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var ns = node.Ancestors().OfType<BaseNamespaceDeclarationSyntax>().FirstOrDefault()?.Name.ToString() ?? "";
+        if (ns.Contains("Logging", StringComparison.OrdinalIgnoreCase) ||
+            ns.Contains("Telemetry", StringComparison.OrdinalIgnoreCase) ||
+            ns.Contains("Metrics", StringComparison.OrdinalIgnoreCase) ||
+            ns.Contains("Diagnostics", StringComparison.OrdinalIgnoreCase) ||
+            ns.Contains("Serilog", StringComparison.OrdinalIgnoreCase) ||
+            ns.Contains("Audit", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (_currentClass.EndsWith("Logger", StringComparison.OrdinalIgnoreCase) ||
+            _currentClass.EndsWith("Logging", StringComparison.OrdinalIgnoreCase) ||
+            _currentClass.EndsWith("LogSink", StringComparison.OrdinalIgnoreCase) ||
+            _currentClass.StartsWith("Logging", StringComparison.OrdinalIgnoreCase) ||
+            _currentClass.StartsWith("Logger", StringComparison.OrdinalIgnoreCase) ||
+            _currentClass.Contains("Telemetry", StringComparison.OrdinalIgnoreCase) ||
+            _currentClass.Contains("Metric", StringComparison.OrdinalIgnoreCase) ||
+            _currentClass.EndsWith("TelemetrySink", StringComparison.OrdinalIgnoreCase) ||
+            _currentClass.EndsWith("MetricsSink", StringComparison.OrdinalIgnoreCase) ||
+            _currentClass.EndsWith("BatchSink", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsGuardedBySemaphoreOrLimiter(SyntaxNode node)
+    {
+        var enclosingClass = node.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault();
+        if (enclosingClass == null) return false;
+
+        var classText = enclosingClass.ToString();
+        return classText.Contains("SemaphoreSlim") ||
+               classText.Contains("RateLimiter") ||
+               classText.Contains("PartitionedRateLimiter");
+    }
+
+    private bool DoesChannelEscape(SyntaxNode node)
+    {
+        if (node.Ancestors().OfType<FieldDeclarationSyntax>().Any())
+            return true;
+        if (node.Ancestors().OfType<PropertyDeclarationSyntax>().Any())
+            return true;
+        if (node.Ancestors().OfType<ConstructorDeclarationSyntax>().Any())
+            return true;
+
+        // Check if inside DI registration call
+        var enclosingInvocation = node.Ancestors().OfType<InvocationExpressionSyntax>()
+            .FirstOrDefault(inv => inv != node);
+        if (enclosingInvocation != null)
+        {
+            var invText = enclosingInvocation.Expression.ToString();
+            if (invText.Contains("AddSingleton") || invText.Contains("AddTransient") || invText.Contains("AddScoped"))
+                return true;
+        }
+
+        // Check if in Top-Level Statements / Program / Startup
+        if (_currentClass is "Program" or "Startup")
+            return true;
+
+        // Check if in a method: if assigned to a local variable, does it escape?
+        var method = node.Ancestors().OfType<MethodDeclarationSyntax>().FirstOrDefault();
+        var enclosingClass = node.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault();
+        if (method != null)
+        {
+            var declarator = node.Ancestors().OfType<VariableDeclaratorSyntax>().FirstOrDefault();
+            if (declarator != null)
+            {
+                var varName = declarator.Identifier.Text;
+                // Does this variable escape by return?
+                foreach (var ret in method.DescendantNodes().OfType<ReturnStatementSyntax>())
+                {
+                    if (ret.Expression != null && ret.Expression.ToString().Contains(varName))
+                        return true;
+                }
+                // Does this variable get assigned to a field or property?
+                foreach (var assign in method.DescendantNodes().OfType<AssignmentExpressionSyntax>())
+                {
+                    if (assign.Right.ToString().Contains(varName))
+                    {
+                        var leftStr = assign.Left.ToString();
+                        if (leftStr.StartsWith("_") || leftStr.StartsWith("this.") ||
+                            (enclosingClass != null && (
+                                enclosingClass.Members.OfType<FieldDeclarationSyntax>().Any(f => f.Declaration.Variables.Any(v => v.Identifier.Text == leftStr)) ||
+                                enclosingClass.Members.OfType<PropertyDeclarationSyntax>().Any(p => p.Identifier.Text == leftStr)
+                            )))
+                        {
+                            return true;
+                        }
+                    }
+                }
+                // Does this variable escape via registration method?
+                foreach (var inv in method.DescendantNodes().OfType<InvocationExpressionSyntax>())
+                {
+                    if (inv.ArgumentList.Arguments.Any(a => a.ToString().Contains(varName)))
+                    {
+                        var invText = inv.Expression.ToString();
+                        if (invText.Contains("Register") || invText.Contains("Subscribe") || invText.Contains("Add") || invText.Contains("Start"))
+                            return true;
+                    }
+                }
+                // Method-local fan-out / fan-in: does not escape
+                return false;
+            }
+            // Direct return: return Channel.CreateUnbounded<T>();
+            if (node.Ancestors().OfType<ReturnStatementSyntax>().Any())
+                return true;
+        }
+
+        return true;
+    }
+
+    private void InspectChannelCreateUnbounded(InvocationExpressionSyntax node)
+    {
+        var exprStr = node.Expression.ToString();
+        if (!exprStr.Contains("Channel") && !exprStr.Contains("CreateUnbounded"))
+            return;
+
+        if (IsTelemetryOrLogging(node))
+            return;
+
+        if (!DoesChannelEscape(node))
+            return;
+
+        bool isGuarded = IsGuardedBySemaphoreOrLimiter(node);
+        string severity = isGuarded ? "warning" : "error";
+        string message = isGuarded
+            ? "Unbounded channel at architectural boundary is constrained by an upstream semaphore or limiter, but lacks native backpressure flow control. Prefer Channel.CreateBounded<T>(capacity) with BoundedChannelFullMode.Wait."
+            : "Unbounded channel at architectural boundary creates a buffer without backpressure. Under downstream latency or stalls, memory grows monotonically until process termination by the Linux cgroup OOM killer. Migrate to Channel.CreateBounded<T>(capacity) with BoundedChannelFullMode.Wait.";
+
+        AddViolation("unbounded_boundary_channel", node, message, severity);
+    }
+
+    private void InspectChannelCreateBounded(InvocationExpressionSyntax node)
+    {
+        var exprStr = node.Expression.ToString();
+        if (!exprStr.Contains("Channel") && !exprStr.Contains("CreateBounded"))
+            return;
+
+        if (IsTelemetryOrLogging(node)) return;
+
+        if (node.ArgumentList.Arguments.Count > 0)
+        {
+            var firstArg = node.ArgumentList.Arguments[0].Expression;
+            var firstArgText = firstArg.ToString();
+
+            if (firstArgText.Contains("int.MaxValue"))
+            {
+                AddViolation(
+                    "unbounded_boundary_channel",
+                    node,
+                    "Bounded channel configured with int.MaxValue is effectively unbounded, providing no backpressure. Use a sized capacity budgeted against container memory limits.",
+                    "error"
+                );
+            }
+            else if (firstArg is LiteralExpressionSyntax lit && lit.Token.Value is int capacity && capacity > 50000)
+            {
+                AddViolation(
+                    "unbounded_boundary_channel",
+                    node,
+                    $"Bounded channel capacity ({capacity:N0}) exceeds safe memory envelope for typical container limits (>50,000 items). Under latency, retained memory may cause excessive Gen 2 GC pressure or OOM. Tune capacity to expected processing rate and memory budget.",
+                    "warning"
+                );
+            }
+        }
+    }
+
+    private void InspectFieldForUnboundedQueue(FieldDeclarationSyntax node)
+    {
+        if (IsTelemetryOrLogging(node)) return;
+
+        var typeStr = node.Declaration.Type.ToString();
+        var varName = node.Declaration.Variables.FirstOrDefault()?.Identifier.Text ?? "";
+        if (varName.Contains("Pool", StringComparison.OrdinalIgnoreCase) ||
+            varName.Contains("FreeList", StringComparison.OrdinalIgnoreCase))
+        {
+            return; // Internal object / buffer pools are not boundary ingress queues
+        }
+
+        if (typeStr.Contains("ConcurrentQueue<"))
+        {
+            bool isGuarded = IsGuardedBySemaphoreOrLimiter(node);
+            string severity = isGuarded ? "warning" : "error";
+            string msg = isGuarded
+                ? "ConcurrentQueue<T> used as shared boundary state is guarded by a semaphore/limiter, but lacks native backpressure flow control. Prefer Channel.CreateBounded<T>(capacity) with BoundedChannelFullMode.Wait."
+                : "ConcurrentQueue<T> used as shared boundary state provides no backpressure API. Under worker lag or downstream stalls, queue depth grows unconstrained, risking Gen 2 GC compaction spikes and Linux OOM-kill. Migrate to Channel.CreateBounded<T>(capacity) with BoundedChannelFullMode.Wait.";
+
+            AddViolation("unbounded_boundary_channel", node, msg, severity);
+        }
+        else if (typeStr.Contains("BlockingCollection<"))
+        {
+            bool isGuarded = IsGuardedBySemaphoreOrLimiter(node);
+            string severity = isGuarded ? "warning" : "error";
+            var initExpr = node.Declaration.Variables.FirstOrDefault()?.Initializer?.Value;
+            bool isUnbounded = false;
+            int? explicitCap = null;
+            bool isMaxVal = false;
+
+            if (initExpr is ImplicitObjectCreationExpressionSyntax implicitNew)
+            {
+                if (implicitNew.ArgumentList == null || implicitNew.ArgumentList.Arguments.Count == 0 ||
+                    implicitNew.ArgumentList.Arguments[0].ToString().Contains("ConcurrentQueue"))
+                {
+                    isUnbounded = true;
+                }
+                else if (implicitNew.ArgumentList.Arguments.Count > 0)
+                {
+                    var arg = implicitNew.ArgumentList.Arguments[0].Expression;
+                    if (arg.ToString().Contains("int.MaxValue")) isMaxVal = true;
+                    else if (arg is LiteralExpressionSyntax lit && lit.Token.Value is int cap) explicitCap = cap;
+                }
+            }
+            else if (initExpr is ObjectCreationExpressionSyntax explicitNew)
+            {
+                if (explicitNew.ArgumentList == null || explicitNew.ArgumentList.Arguments.Count == 0 ||
+                    explicitNew.ArgumentList.Arguments[0].ToString().Contains("ConcurrentQueue"))
+                {
+                    isUnbounded = true;
+                }
+                else if (explicitNew.ArgumentList.Arguments.Count > 0)
+                {
+                    var arg = explicitNew.ArgumentList.Arguments[0].Expression;
+                    if (arg.ToString().Contains("int.MaxValue")) isMaxVal = true;
+                    else if (arg is LiteralExpressionSyntax lit && lit.Token.Value is int cap) explicitCap = cap;
+                }
+            }
+            else if (initExpr != null)
+            {
+                var initText = initExpr.ToString();
+                isUnbounded = initText.StartsWith("new()") || (initText.Contains("new BlockingCollection") && (!initText.Contains("(") || initText.Contains("()") || initText.Contains("ConcurrentQueue")));
+            }
+
+            if (isUnbounded || isMaxVal)
+            {
+                string msg = isGuarded
+                    ? "BlockingCollection<T> configured with unbounded capacity (int.MaxValue) is guarded by semaphore/limiter, but lacks native backpressure flow control. Migrate to a bounded capacity or Channel.CreateBounded<T>(capacity)."
+                    : "BlockingCollection<T> instantiated with default unbounded capacity (int.MaxValue). Under worker lag or downstream stalls, queue depth grows unconstrained, risking Gen 2 GC compaction spikes and Linux OOM-kill. Migrate to a bounded capacity (e.g. new BlockingCollection<T>(capacity)) or Channel.CreateBounded<T>(capacity).";
+                AddViolation("unbounded_boundary_channel", node, msg, severity);
+            }
+            else if (explicitCap.HasValue && explicitCap.Value > 50000)
+            {
+                AddViolation(
+                    "unbounded_boundary_channel",
+                    node,
+                    $"BlockingCollection<T> capacity ({explicitCap.Value:N0}) exceeds safe memory envelope for typical container limits (>50,000 items). Under latency, retained memory may cause excessive Gen 2 GC pressure or OOM. Tune capacity to expected processing rate and memory budget.",
+                    "warning"
+                );
+            }
+        }
+    }
+
+    private void InspectPropertyForUnboundedQueue(PropertyDeclarationSyntax node)
+    {
+        if (IsTelemetryOrLogging(node)) return;
+
+        var typeStr = node.Type.ToString();
+        var propName = node.Identifier.Text;
+        if (propName.Contains("Pool", StringComparison.OrdinalIgnoreCase) ||
+            propName.Contains("FreeList", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (typeStr.Contains("ConcurrentQueue<"))
+        {
+            bool isGuarded = IsGuardedBySemaphoreOrLimiter(node);
+            string severity = isGuarded ? "warning" : "error";
+            string msg = isGuarded
+                ? "ConcurrentQueue<T> used as shared boundary state is guarded by a semaphore/limiter, but lacks native backpressure flow control. Prefer Channel.CreateBounded<T>(capacity) with BoundedChannelFullMode.Wait."
+                : "ConcurrentQueue<T> used as shared boundary state provides no backpressure API. Under worker lag or downstream stalls, queue depth grows unconstrained, risking Gen 2 GC compaction spikes and Linux OOM-kill. Migrate to Channel.CreateBounded<T>(capacity) with BoundedChannelFullMode.Wait.";
+
+            AddViolation("unbounded_boundary_channel", node, msg, severity);
+        }
+        else if (typeStr.Contains("BlockingCollection<"))
+        {
+            bool isGuarded = IsGuardedBySemaphoreOrLimiter(node);
+            string severity = isGuarded ? "warning" : "error";
+            var initExpr = node.Initializer?.Value;
+            bool isUnbounded = false;
+            int? explicitCap = null;
+            bool isMaxVal = false;
+
+            if (initExpr is ImplicitObjectCreationExpressionSyntax implicitNew)
+            {
+                if (implicitNew.ArgumentList == null || implicitNew.ArgumentList.Arguments.Count == 0 ||
+                    implicitNew.ArgumentList.Arguments[0].ToString().Contains("ConcurrentQueue"))
+                {
+                    isUnbounded = true;
+                }
+                else if (implicitNew.ArgumentList.Arguments.Count > 0)
+                {
+                    var arg = implicitNew.ArgumentList.Arguments[0].Expression;
+                    if (arg.ToString().Contains("int.MaxValue")) isMaxVal = true;
+                    else if (arg is LiteralExpressionSyntax lit && lit.Token.Value is int cap) explicitCap = cap;
+                }
+            }
+            else if (initExpr is ObjectCreationExpressionSyntax explicitNew)
+            {
+                if (explicitNew.ArgumentList == null || explicitNew.ArgumentList.Arguments.Count == 0 ||
+                    explicitNew.ArgumentList.Arguments[0].ToString().Contains("ConcurrentQueue"))
+                {
+                    isUnbounded = true;
+                }
+                else if (explicitNew.ArgumentList.Arguments.Count > 0)
+                {
+                    var arg = explicitNew.ArgumentList.Arguments[0].Expression;
+                    if (arg.ToString().Contains("int.MaxValue")) isMaxVal = true;
+                    else if (arg is LiteralExpressionSyntax lit && lit.Token.Value is int cap) explicitCap = cap;
+                }
+            }
+            else if (initExpr != null)
+            {
+                var initText = initExpr.ToString();
+                isUnbounded = initText.StartsWith("new()") || (initText.Contains("new BlockingCollection") && (!initText.Contains("(") || initText.Contains("()") || initText.Contains("ConcurrentQueue")));
+            }
+
+            if (isUnbounded || isMaxVal)
+            {
+                string msg = isGuarded
+                    ? "BlockingCollection<T> configured with unbounded capacity (int.MaxValue) is guarded by semaphore/limiter, but lacks native backpressure flow control. Migrate to a bounded capacity or Channel.CreateBounded<T>(capacity)."
+                    : "BlockingCollection<T> instantiated with default unbounded capacity (int.MaxValue). Under worker lag or downstream stalls, queue depth grows unconstrained, risking Gen 2 GC compaction spikes and Linux OOM-kill. Migrate to a bounded capacity (e.g. new BlockingCollection<T>(capacity)) or Channel.CreateBounded<T>(capacity).";
+                AddViolation("unbounded_boundary_channel", node, msg, severity);
+            }
+            else if (explicitCap.HasValue && explicitCap.Value > 50000)
+            {
+                AddViolation(
+                    "unbounded_boundary_channel",
+                    node,
+                    $"BlockingCollection<T> capacity ({explicitCap.Value:N0}) exceeds safe memory envelope for typical container limits (>50,000 items). Under latency, retained memory may cause excessive Gen 2 GC pressure or OOM. Tune capacity to expected processing rate and memory budget.",
+                    "warning"
+                );
+            }
+        }
+    }
+
+    private void InspectObjectCreationForUnboundedQueue(ObjectCreationExpressionSyntax node)
+    {
+        var typeStr = node.Type.ToString();
+        if (typeStr.Contains("BlockingCollection<"))
+        {
+            if (!IsTelemetryOrLogging(node) && DoesChannelEscape(node))
+            {
+                bool isGuarded = IsGuardedBySemaphoreOrLimiter(node);
+                string severity = isGuarded ? "warning" : "error";
+
+                if (node.ArgumentList == null || node.ArgumentList.Arguments.Count == 0 ||
+                    (node.ArgumentList.Arguments.Count == 1 && node.ArgumentList.Arguments[0].ToString().Contains("ConcurrentQueue")))
+                {
+                    string msg = isGuarded
+                        ? "BlockingCollection<T> instantiated with default unbounded capacity (int.MaxValue) is guarded by semaphore/limiter, but lacks native backpressure flow control. Migrate to a bounded capacity or Channel.CreateBounded<T>(capacity)."
+                        : "BlockingCollection<T> instantiated with default unbounded capacity (int.MaxValue). Under worker lag or downstream stalls, queue depth grows unconstrained, risking Gen 2 GC compaction spikes and Linux OOM-kill. Migrate to a bounded capacity (e.g. new BlockingCollection<T>(capacity)) or Channel.CreateBounded<T>(capacity).";
+                    AddViolation("unbounded_boundary_channel", node, msg, severity);
+                }
+                else if (node.ArgumentList.Arguments.Count > 0)
+                {
+                    var firstArg = node.ArgumentList.Arguments[0].Expression;
+                    var firstArgText = firstArg.ToString();
+                    if (firstArgText.Contains("int.MaxValue"))
+                    {
+                        AddViolation(
+                            "unbounded_boundary_channel",
+                            node,
+                            "BlockingCollection<T> configured with int.MaxValue is effectively unbounded, providing no backpressure. Use a sized capacity budgeted against container memory limits.",
+                            severity
+                        );
+                    }
+                    else if (firstArg is LiteralExpressionSyntax lit && lit.Token.Value is int capacity && capacity > 50000)
+                    {
+                        AddViolation(
+                            "unbounded_boundary_channel",
+                            node,
+                            $"BlockingCollection<T> capacity ({capacity:N0}) exceeds safe memory envelope for typical container limits (>50,000 items). Under latency, retained memory may cause excessive Gen 2 GC pressure or OOM. Tune capacity to expected processing rate and memory budget.",
+                            "warning"
+                        );
+                    }
+                }
+            }
+        }
+        else if (typeStr.Contains("BoundedChannelOptions"))
+        {
+            if (!IsTelemetryOrLogging(node) && node.ArgumentList != null && node.ArgumentList.Arguments.Count > 0)
+            {
+                var firstArg = node.ArgumentList.Arguments[0].Expression;
+                var firstArgText = firstArg.ToString();
+                if (firstArgText.Contains("int.MaxValue"))
+                {
+                    AddViolation(
+                        "unbounded_boundary_channel",
+                        node,
+                        "BoundedChannelOptions configured with int.MaxValue is effectively unbounded, providing no backpressure. Use a sized capacity budgeted against container memory limits.",
+                        "error"
+                    );
+                }
+                else if (firstArg is LiteralExpressionSyntax lit && lit.Token.Value is int capacity && capacity > 50000)
+                {
+                    AddViolation(
+                        "unbounded_boundary_channel",
+                        node,
+                        $"BoundedChannelOptions capacity ({capacity:N0}) exceeds safe memory envelope for typical container limits (>50,000 items). Under latency, retained memory may cause excessive Gen 2 GC pressure or OOM. Tune capacity to expected processing rate and memory budget.",
+                        "warning"
+                    );
+                }
+            }
+        }
     }
 }

@@ -9,6 +9,8 @@ using Polly;
 using Polly.Retry;
 using Polly.Timeout;
 using StackExchange.Redis;
+using System.Threading.Channels;
+using System.Collections.Concurrent;
 using MassTransit;
 
 namespace SampleApp.Infrastructure;
@@ -111,3 +113,75 @@ public static class ResilienceConfiguration
         });
     }
 }
+
+// VIOLATIONS: Unbounded Channel & Queue patterns at boundary
+public class UnboundedQueueWorker
+{
+    // VIOLATION: unbounded_boundary_channel
+    private readonly Channel<string> _inbox = Channel.CreateUnbounded<string>();
+
+    // VIOLATION: unbounded_boundary_channel
+    private readonly ConcurrentQueue<string> _legacyQueue = new();
+
+    // VIOLATION: unbounded_boundary_channel
+    private readonly BlockingCollection<string> _blockingColl = new();
+
+    public ChannelWriter<string> Writer => _inbox.Writer;
+}
+
+// CLEAN: Bounded Channel & Queue with explicit capacity and backpressure
+public class BoundedQueueWorker
+{
+    private readonly Channel<string> _boundedInbox = Channel.CreateBounded<string>(new BoundedChannelOptions(1000)
+    {
+        FullMode = BoundedChannelFullMode.Wait
+    });
+
+    private readonly BlockingCollection<string> _boundedColl = new(500);
+
+    public ChannelWriter<string> Writer => _boundedInbox.Writer;
+}
+
+// CLEAN (Noise Filter): Telemetry sink with unbounded channel is permitted
+public class TelemetryBatchSink
+{
+    private readonly Channel<string> _telemetryChannel = Channel.CreateUnbounded<string>();
+}
+
+// CLEAN (Noise Filter): Method-scoped ephemeral channel does not escape
+public class LocalFanOutService
+{
+    public async Task ProcessLocallyAsync()
+    {
+        var localChannel = Channel.CreateUnbounded<int>();
+        localChannel.Writer.TryWrite(42);
+        localChannel.Writer.Complete();
+        while (await localChannel.Reader.WaitToReadAsync())
+        {
+            while (localChannel.Reader.TryRead(out var item))
+            {
+                _ = item;
+            }
+        }
+    }
+}
+
+// CORNER CASE: Domain class with "log" substring (Catalog) must NOT be suppressed
+public class CatalogIngestionWorker
+{
+    private readonly Channel<string> _catalogItems = Channel.CreateUnbounded<string>();
+}
+
+// CORNER CASE: Guarded by SemaphoreSlim -> severity should be warning
+public class GuardedQueueWorker
+{
+    private readonly SemaphoreSlim _gate = new SemaphoreSlim(5);
+    private readonly ConcurrentQueue<string> _guardedQueue = new ConcurrentQueue<string>();
+}
+
+// CORNER CASE: Excessive capacity (>50,000) -> warning
+public class ExcessiveCapacityWorker
+{
+    private readonly Channel<string> _largeChannel = Channel.CreateBounded<string>(100000);
+}
+

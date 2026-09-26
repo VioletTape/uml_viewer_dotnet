@@ -162,6 +162,13 @@ class HeadlessAgentWorker:
                     f"Simulation: Replace hand-rolled retry/timeout loops in {from_cls} with Microsoft.Extensions.Resilience "
                     f"pipeline (ResiliencePipelineBuilder / AddStandardResilienceHandler). Enforces exponential backoff with jitter and fail-fast cancellation."
                 )
+            elif kind == "unbounded_boundary_channel":
+                prop_id = f"prop-bounded-channel-{slugify(from_cls)}"
+                prop_name = f"Flow Control: Sized Bounded Channel for {from_cls}"
+                description = (
+                    f"Simulation: Migrate boundary queue in {from_cls} to Channel.CreateBounded<T>(capacity) "
+                    f"with BoundedChannelFullMode.Wait to enforce cooperative backpressure and prevent Linux cgroup OOM-kill."
+                )
             else:
                 prop_id = f"prop-resilience-{slugify(from_cls)}"
                 prop_name = f"Resilience: Standard Resilience Handler for {from_cls}"
@@ -340,6 +347,28 @@ class HeadlessAgentWorker:
                     f"wasting CPU, memory, and database connections on orphaned results no client will ever receive.\n\n"
                     f"**Recommended Fix**:\n"
                     f"Pass `cancellationToken` into `.SendAsync(..., cancellationToken)` or `.SaveChangesAsync(cancellationToken)`."
+                )
+            elif kind == "unbounded_boundary_channel":
+                return (
+                    f"### Stability Antipattern: Unbounded Channel / Queue at Boundary\n\n"
+                    f"**Class**: `{from_cls}` ({from_layer})\n"
+                    f"**Problem**: An unbounded queue or channel (`Channel.CreateUnbounded<T>()`, `ConcurrentQueue<T>`, or `BlockingCollection<T>`) is used at a service boundary without backpressure.\n\n"
+                    f"**Why this is dangerous (Nygard 'Release It!')**:\n"
+                    f"An unbounded buffer decouples ingress rate from worker egress rate, providing an illusion of safety. "
+                    f"Under downstream latency or worker stalls, items accumulate monotonically in memory. "
+                    f"This triggers Gen 2 GC thrashing and ultimately catastrophic process termination by the Linux cgroup OOM killer (`SIGKILL`).\n\n"
+                    f"**Recommended Fix**:\n"
+                    f"Migrate to a bounded channel with an explicit drop or wait backpressure strategy:\n"
+                    f"```csharp\n"
+                    f"var options = new BoundedChannelOptions(1000)\n"
+                    f"{{\n"
+                    f"    FullMode = BoundedChannelFullMode.Wait,\n"
+                    f"    SingleReader = true,\n"
+                    f"    SingleWriter = false\n"
+                    f"}};\n"
+                    f"var channel = Channel.CreateBounded<WorkItem>(options);\n"
+                    f"```\n"
+                    f"Or return HTTP 429 / 503 with `Retry-After` pushback when the channel buffer is full."
                 )
             elif kind == "suspicious_custom_resilience":
                 return (
