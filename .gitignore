@@ -1,9 +1,39 @@
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.swp
 *~
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Local Environment & IDEs
 .DS_Store
 .idea/
 .vscode/
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# .NET Build Outputs & Caches (restored/generated via dotnet build)
+**/[Bb]in/
+**/[Oo]bj/
+**/bin/
+**/obj/
+packages/
+TestResults/
+
+# Node / Web
+node_modules/
+
+# UML Viewer Local Runtime Data & Databases
+.uml-viewer/
+.codegraph/
+*.db-wal
+*.db-shm
+
+# WIP
 wip/

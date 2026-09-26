@@ -289,6 +289,8 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
 
     def __init__(self, *args, **kwargs):
         frontend_dir = os.path.join(os.path.dirname(__file__), "frontend")
+        if not os.path.isdir(frontend_dir):
+            frontend_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "frontend")
         super().__init__(*args, directory=frontend_dir, **kwargs)
 
     def parse_request(self):

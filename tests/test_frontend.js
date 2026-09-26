@@ -1,6 +1,7 @@
 // Run with node test_frontend.js; no browser or dependencies required.
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const path = require("node:path");
 const vm = require("node:vm");
 
 const elements = [];
@@ -24,7 +25,8 @@ const context = {
   window: { addEventListener() {} }, console,
 };
 vm.createContext(context);
-vm.runInContext(fs.readFileSync(`${__dirname}/frontend/app.js`, "utf8"), context);
+const appJsPath = path.resolve(__dirname, "..", "frontend", "app.js");
+vm.runInContext(fs.readFileSync(appJsPath, "utf8"), context);
 
 const payload = `<img src=x onerror="globalThis.injected=1">`;
 context.payload = payload;

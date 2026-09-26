@@ -46,21 +46,27 @@ class StabilityAnalyzer:
         self.roslyn_bin = roslyn_bin or self._find_roslyn_tool()
 
     def _find_roslyn_tool(self) -> Optional[str]:
-        # Check compiled binary first
-        candidate_bin = os.path.join(
+        search_dirs = [
             os.path.dirname(__file__),
-            "tools", "RoslynStabilityAnalyzer", "bin", "Release", "net10.0", "RoslynStabilityAnalyzer"
-        )
-        if os.path.isfile(candidate_bin) and os.access(candidate_bin, os.X_OK):
-            return candidate_bin
-        
-        # Check csproj for dotnet run
-        candidate_csproj = os.path.join(
-            os.path.dirname(__file__),
-            "tools", "RoslynStabilityAnalyzer", "RoslynStabilityAnalyzer.csproj"
-        )
-        if os.path.isfile(candidate_csproj):
-            return candidate_csproj
+            os.path.dirname(os.path.dirname(__file__)),
+            getattr(self, "project_path", ""),
+        ]
+        for base in search_dirs:
+            if not base:
+                continue
+            # Check compiled binary first
+            candidate_bin = os.path.join(
+                base, "tools", "RoslynStabilityAnalyzer", "bin", "Release", "net10.0", "RoslynStabilityAnalyzer"
+            )
+            if os.path.isfile(candidate_bin) and os.access(candidate_bin, os.X_OK):
+                return candidate_bin
+            
+            # Check csproj for dotnet run
+            candidate_csproj = os.path.join(
+                base, "tools", "RoslynStabilityAnalyzer", "RoslynStabilityAnalyzer.csproj"
+            )
+            if os.path.isfile(candidate_csproj):
+                return candidate_csproj
         return None
 
     # =========================================================================

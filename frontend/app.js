@@ -780,28 +780,57 @@ function selectClass(cls, activeViolation = null) {
             } else if (cat === "unassigned_layer") {
               catBadge = "UNASSIGNED TYPE";
               catColor = "#d29922";
+            } else if (cat === "stability_rule") {
+              if (v.kind === "suspicious_custom_resilience") {
+                catBadge = "SCOUTED (CUSTOM RESILIENCE)";
+                catColor = "#e3b341";
+              } else {
+                catBadge = "STABILITY (NYGARD)";
+                catColor = "#f778ba";
+              }
             }
 
             const violSlug = `${slugify(v.from_class)}-${slugify(v.to_class || 'none')}`;
             const isOutgoing = v.from_class === cls.name;
+            const isScouted = v.kind === "suspicious_custom_resilience";
 
             return `
               <div class="inspect-violation-card ${isHighlighted ? 'active-highlight' : ''}" id="inspect-viol-${violSlug}">
                 <div class="viol-title" style="display: flex; justify-content: space-between; align-items: center;">
                   <span style="color: ${catColor}; font-weight: 700; font-size: 11px;">⚠ ${catBadge}</span>
-                  <span style="font-size: 10px; padding: 1px 6px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #8b949e;">${isOutgoing ? 'OUTGOING' : 'INCOMING'}</span>
+                  <div style="display: flex; align-items: center; gap: 4px;">
+                    ${v.occurrences && v.occurrences > 1 ? `<span class="viol-badge-occurrences">${v.occurrences} calls</span>` : ''}
+                    <span style="font-size: 10px; padding: 1px 6px; border-radius: 4px; background: rgba(255,255,255,0.06); color: #8b949e;">${isOutgoing ? 'OUTGOING' : 'INCOMING'}</span>
+                  </div>
                 </div>
                 <div class="viol-path" style="margin: 6px 0; font-size: 11px;">
                   <strong>${escapeHtml(v.from_class)}</strong> (${escapeHtml(v.from_layer || 'None')}) &rarr; <strong>${escapeHtml(v.to_class || 'None')}</strong> (${escapeHtml(v.to_layer || 'None')})
                 </div>
                 <div class="viol-reason" style="font-size: 11px; margin-bottom: 6px; word-break: break-word; overflow-wrap: anywhere;">${escapeHtml(v.reason)}</div>
-                ${v.file_path ? `<div class="viol-loc" style="font-size: 10px; margin-bottom: 8px; word-break: break-all; overflow-wrap: anywhere; line-height: 1.4;">📍 ${escapeHtml(v.file_path)}:${v.line || 1}</div>` : ''}
+                ${v.file_path ? `<div class="viol-loc" style="font-size: 10px; margin-bottom: 8px; word-break: break-all; overflow-wrap: anywhere; line-height: 1.4;">📍 ${escapeHtml(v.file_path)}:${v.line || 1}${v.occurrences && v.occurrences > 1 ? ` (+${v.occurrences - 1} call sites)` : ''}</div>` : ''}
+
+                ${v.details && v.details.length > 1 ? `
+                <div style="margin: 8px 0 10px 0; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 6px;">
+                  <div style="font-size: 10px; font-weight: 600; color: #8b949e; text-transform: uppercase; margin-bottom: 4px;">
+                    Aggregated Call Sites (${v.details.length})
+                  </div>
+                  <div style="max-height: 120px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; padding-right: 4px;">
+                    ${v.details.map(d => `
+                      <div style="font-size: 10px; background: rgba(0,0,0,0.25); padding: 4px 6px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.05); display: flex; justify-content: space-between; align-items: center; gap: 6px;">
+                        <span style="color: #79c0ff; font-weight: 600; flex-shrink: 0;">Line ${d.line}:</span>
+                        <span style="color: #c9d1d9; flex: 1; word-break: break-word;">${escapeHtml(d.reason || d.kind)}</span>
+                        ${v.file_path ? `<button onclick="openInEditor(${htmlJs(v.file_path)}, ${d.line}, event)" style="background: none; border: none; color: #58a6ff; cursor: pointer; font-size: 10px; flex-shrink: 0;">✎</button>` : ''}
+                      </div>
+                    `).join("")}
+                  </div>
+                </div>
+                ` : ''}
                 
                 <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px;">
-                  <button class="btn btn-sm" onclick="askAgentToFixForViolation(${htmlJs(v.from_class)}, ${htmlJs(v.to_class)}, event)" style="font-size: 11px; padding: 3px 10px; background: #238636; border-color: #2ea043; color: #fff;" title="Autonomous AI Agent generates What-If DIP decoupling proposal">
-                    🤖 Fix with AI
+                  <button class="btn btn-sm" onclick="askAgentToFixForViolation(${htmlJs(v.from_class)}, ${htmlJs(v.to_class)}, event)" style="font-size: 11px; padding: 3px 10px; background: #238636; border-color: #2ea043; color: #fff;" title="${isScouted ? 'Autonomous AI Agent audits custom loop and generates Polly v8 migration proposal' : 'Autonomous AI Agent generates What-If DIP decoupling proposal'}">
+                    ${isScouted ? '🤖 Audit with AI' : '🤖 Fix with AI'}
                   </button>
-                  <button class="btn btn-sm" onclick="askAgentToExplainViolation(${htmlJs(v.from_class)}, ${htmlJs(v.to_class)}, event)" style="font-size: 11px; padding: 3px 10px; background: rgba(163, 113, 247, 0.15); border-color: rgba(163, 113, 247, 0.4); color: #d2a8ff;" title="AI explains Clean Architecture principles & solution">
+                  <button class="btn btn-sm" onclick="askAgentToExplainViolation(${htmlJs(v.from_class)}, ${htmlJs(v.to_class)}, event)" style="font-size: 11px; padding: 3px 10px; background: rgba(163, 113, 247, 0.15); border-color: rgba(163, 113, 247, 0.4); color: #d2a8ff;" title="AI explains Clean Architecture & Stability principles">
                     💡 Explain with AI
                   </button>
                   ${v.file_path ? `
@@ -979,6 +1008,41 @@ function renderQualityTab() {
   `;
 }
 
+const VIOLATION_CATEGORIES = {
+  "stability_rule": {
+    topic: "Stability Patterns (Nygard)",
+    badge: "STABILITY (NYGARD)",
+    color: "#f778ba",
+    order: 1
+  },
+  "dependency_rule": {
+    topic: "Dependency Rules",
+    badge: "DEPENDENCY RULE",
+    color: "#ff7b72",
+    order: 2
+  },
+  "cycle": {
+    topic: "Circular Dependencies (ADP)",
+    badge: "CIRCULAR DEPENDENCY (ADP)",
+    color: "#d2a8ff",
+    order: 3
+  },
+  "framework_taint": {
+    topic: "Framework Isolation",
+    badge: "FRAMEWORK TAINT",
+    color: "#f0883e",
+    order: 4
+  },
+  "unassigned_layer": {
+    topic: "Layer Completeness",
+    badge: "UNASSIGNED TYPE",
+    color: "#d29922",
+    order: 5
+  }
+};
+
+let expandedViolationCategories = new Set();
+
 function renderViolationsList() {
   const container = document.getElementById("violations-list");
   const violations = graphData.violations || [];
@@ -988,46 +1052,145 @@ function renderViolationsList() {
     return;
   }
 
-  container.innerHTML = violations.map((v, i) => {
+  // Group violations by category
+  const groups = {};
+  violations.forEach((v, i) => {
     const cat = v.category || "dependency_rule";
-    let catBadge = "DEPENDENCY RULE";
-    let catColor = "#ff7b72";
-    if (cat === "cycle") {
-      catBadge = "CIRCULAR DEPENDENCY (ADP)";
-      catColor = "#d2a8ff";
-    } else if (cat === "framework_taint") {
-      catBadge = "FRAMEWORK TAINT";
-      catColor = "#f0883e";
-    } else if (cat === "unassigned_layer") {
-      catBadge = "UNASSIGNED TYPE";
-      catColor = "#d29922";
+    if (!groups[cat]) {
+      groups[cat] = [];
     }
+    groups[cat].push({ violation: v, originalIndex: i });
+  });
 
-    return `
-    <div class="violation-card" onclick="inspectViolation(${i})" style="cursor: pointer;" title="Click to view details, fix or explain with AI in Inspector">
-      <div class="viol-title">
-        <span style="color: ${catColor}; font-weight: 600;">⚠ ${catBadge}</span>
-        <span style="font-size: 10px; color: #8b949e">#${i + 1}</span>
+  // Sort categories by predefined order
+  const sortedCatKeys = Object.keys(groups).sort((a, b) => {
+    const orderA = VIOLATION_CATEGORIES[a]?.order ?? 99;
+    const orderB = VIOLATION_CATEGORIES[b]?.order ?? 99;
+    return orderA - orderB;
+  });
+
+  let html = `
+    <div class="violations-toolbar">
+      <div class="violations-count-summary">
+        Total: <strong>${violations.length}</strong> findings across <strong>${sortedCatKeys.length}</strong> categories
       </div>
-      <div class="viol-path">
-        <strong>${escapeHtml(v.from_class)}</strong> (${escapeHtml(v.from_layer || 'None')}) → <strong>${escapeHtml(v.to_class || 'None')}</strong> (${escapeHtml(v.to_layer || 'None')})
-      </div>
-      <div class="viol-reason">${escapeHtml(v.reason)}</div>
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
-        <div class="viol-loc">📍 ${escapeHtml(v.file_path || "Unknown")}:${v.line || 1}</div>
-        <div style="display: flex; align-items: center; gap: 4px; font-size: 11px; color: #58a6ff; font-weight: 500;">
-          <span>Inspect & Fix</span>
-          <span>&rarr;</span>
-        </div>
+      <div class="viol-toolbar-actions">
+        <button class="viol-toolbar-btn" onclick="toggleAllViolationCategories(true)" title="Expand all categories">▾ Expand All</button>
+        <button class="viol-toolbar-btn" onclick="toggleAllViolationCategories(false)" title="Collapse all categories">▸ Collapse All</button>
       </div>
     </div>
   `;
-  }).join("");
+
+  sortedCatKeys.forEach(catKey => {
+    const items = groups[catKey];
+    const meta = VIOLATION_CATEGORIES[catKey] || {
+      topic: catKey.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+      badge: catKey.toUpperCase(),
+      color: "#8b949e"
+    };
+
+    const isExpanded = expandedViolationCategories.has(catKey);
+    const errCount = items.filter(it => it.violation.severity === "error").length;
+    const warnCount = items.length - errCount;
+
+    html += `
+      <div class="viol-category-group ${isExpanded ? 'expanded' : ''}" id="viol-cat-${catKey}" data-cat="${catKey}">
+        <div class="viol-category-header" onclick="toggleViolationCategory('${catKey}')">
+          <span class="viol-category-chevron">${isExpanded ? '▼' : '▶'}</span>
+          <span class="viol-category-dot" style="background: ${meta.color};"></span>
+          <span class="viol-category-title">${escapeHtml(meta.topic)} (${items.length})</span>
+          <span class="viol-category-counts">
+            ${errCount > 0 ? `<span class="viol-badge-err">${errCount} err</span>` : ''}
+            ${warnCount > 0 ? `<span class="viol-badge-warn">${warnCount} warn</span>` : ''}
+          </span>
+        </div>
+        <div class="viol-category-body" style="display: ${isExpanded ? 'block' : 'none'};">
+          ${items.map(({ violation: v, originalIndex: i }) => {
+            let catBadge = meta.badge;
+            let catColor = meta.color;
+            if (catKey === "stability_rule" && v.kind === "suspicious_custom_resilience") {
+              catBadge = "SCOUTED (CUSTOM RESILIENCE)";
+              catColor = "#e3b341";
+            }
+
+            return `
+              <div class="violation-card" onclick="inspectViolation(${i})" style="cursor: pointer;" title="Click to view details, fix or explain with AI in Inspector">
+                <div class="viol-title">
+                  <span style="color: ${catColor}; font-weight: 600;">⚠ ${catBadge}</span>
+                  ${v.occurrences && v.occurrences > 1 ? `<span class="viol-badge-occurrences">${v.occurrences} calls</span>` : ''}
+                  <span style="font-size: 10px; color: #8b949e; margin-left: auto;">#${i + 1}</span>
+                </div>
+                <div class="viol-path">
+                  <strong>${escapeHtml(v.from_class)}</strong> (${escapeHtml(v.from_layer || 'None')}) → <strong>${escapeHtml(v.to_class || 'None')}</strong> (${escapeHtml(v.to_layer || 'None')})
+                </div>
+                <div class="viol-reason">${escapeHtml(v.reason)}</div>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 8px;">
+                  <div class="viol-loc">📍 ${escapeHtml(v.file_path || "Unknown")}:${v.line || 1}${v.occurrences && v.occurrences > 1 ? ` (+${v.occurrences - 1} call sites)` : ''}</div>
+                  <div style="display: flex; align-items: center; gap: 4px; font-size: 11px; color: #58a6ff; font-weight: 500;">
+                    <span>Inspect & Fix</span>
+                    <span>&rarr;</span>
+                  </div>
+                </div>
+              </div>
+            `;
+          }).join("")}
+        </div>
+      </div>
+    `;
+  });
+
+  container.innerHTML = html;
+}
+
+function toggleViolationCategory(catKey) {
+  const groupEl = document.getElementById(`viol-cat-${catKey}`);
+  if (!groupEl) return;
+  const isExpanded = groupEl.classList.contains("expanded");
+  const body = groupEl.querySelector(".viol-category-body");
+  const chevron = groupEl.querySelector(".viol-category-chevron");
+
+  if (isExpanded) {
+    groupEl.classList.remove("expanded");
+    expandedViolationCategories.delete(catKey);
+    if (body) body.style.display = "none";
+    if (chevron) chevron.textContent = "▶";
+  } else {
+    groupEl.classList.add("expanded");
+    expandedViolationCategories.add(catKey);
+    if (body) body.style.display = "block";
+    if (chevron) chevron.textContent = "▼";
+  }
+}
+
+function toggleAllViolationCategories(expand) {
+  const groups = document.querySelectorAll(".viol-category-group");
+  groups.forEach(groupEl => {
+    const catKey = groupEl.dataset.cat;
+    const body = groupEl.querySelector(".viol-category-body");
+    const chevron = groupEl.querySelector(".viol-category-chevron");
+    if (expand) {
+      groupEl.classList.add("expanded");
+      if (catKey) expandedViolationCategories.add(catKey);
+      if (body) body.style.display = "block";
+      if (chevron) chevron.textContent = "▼";
+    } else {
+      groupEl.classList.remove("expanded");
+      if (catKey) expandedViolationCategories.delete(catKey);
+      if (body) body.style.display = "none";
+      if (chevron) chevron.textContent = "▶";
+    }
+  });
 }
 
 function inspectViolation(violationIndex) {
   const v = (graphData.violations || [])[violationIndex];
   if (!v) return;
+
+  const catKey = v.category || "dependency_rule";
+  const groupEl = document.getElementById(`viol-cat-${catKey}`);
+  if (groupEl && !groupEl.classList.contains("expanded")) {
+    toggleViolationCategory(catKey);
+  }
 
   const cls = (graphData.classes || []).find(c => c.name === v.from_class && c.namespace === v.from_namespace);
   if (cls) {
@@ -1063,6 +1226,7 @@ function renderStandaloneViolationInspector(v) {
   if (cat === "cycle") { catBadge = "CIRCULAR DEPENDENCY (ADP)"; catColor = "#d2a8ff"; }
   else if (cat === "framework_taint") { catBadge = "FRAMEWORK TAINT"; catColor = "#f0883e"; }
   else if (cat === "unassigned_layer") { catBadge = "UNASSIGNED TYPE"; catColor = "#d29922"; }
+  else if (cat === "stability_rule") { catBadge = "STABILITY (NYGARD)"; catColor = "#f778ba"; }
 
   const violSlug = `${slugify(v.from_class)}-${slugify(v.to_class || 'none')}`;
 
@@ -1072,12 +1236,30 @@ function renderStandaloneViolationInspector(v) {
       <div class="inspect-violation-card active-highlight">
         <div class="viol-title" style="display: flex; justify-content: space-between; align-items: center;">
           <span style="color: ${catColor}; font-weight: 700; font-size: 11px;">⚠ ${catBadge}</span>
+          ${v.occurrences && v.occurrences > 1 ? `<span class="viol-badge-occurrences">${v.occurrences} calls</span>` : ''}
         </div>
         <div class="viol-path" style="margin: 6px 0; font-size: 11px; word-break: break-word; overflow-wrap: anywhere;">
           <strong>${escapeHtml(v.from_class)}</strong> (${escapeHtml(v.from_layer || 'None')}) &rarr; <strong>${escapeHtml(v.to_class || 'None')}</strong> (${escapeHtml(v.to_layer || 'None')})
         </div>
         <div class="viol-reason" style="font-size: 11px; margin-bottom: 6px; word-break: break-word; overflow-wrap: anywhere;">${escapeHtml(v.reason)}</div>
-        ${v.file_path ? `<div class="viol-loc" style="font-size: 10px; margin-bottom: 8px; word-break: break-all; overflow-wrap: anywhere; line-height: 1.4;">📍 ${escapeHtml(v.file_path)}:${v.line || 1}</div>` : ''}
+        ${v.file_path ? `<div class="viol-loc" style="font-size: 10px; margin-bottom: 8px; word-break: break-all; overflow-wrap: anywhere; line-height: 1.4;">📍 ${escapeHtml(v.file_path)}:${v.line || 1}${v.occurrences && v.occurrences > 1 ? ` (+${v.occurrences - 1} call sites)` : ''}</div>` : ''}
+
+        ${v.details && v.details.length > 1 ? `
+        <div style="margin: 8px 0 10px 0; border-top: 1px solid rgba(255,255,255,0.08); padding-top: 6px;">
+          <div style="font-size: 10px; font-weight: 600; color: #8b949e; text-transform: uppercase; margin-bottom: 4px;">
+            Aggregated Call Sites (${v.details.length})
+          </div>
+          <div style="max-height: 120px; overflow-y: auto; display: flex; flex-direction: column; gap: 4px; padding-right: 4px;">
+            ${v.details.map(d => `
+              <div style="font-size: 10px; background: rgba(0,0,0,0.25); padding: 4px 6px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.05); display: flex; justify-content: space-between; align-items: center; gap: 6px;">
+                <span style="color: #79c0ff; font-weight: 600; flex-shrink: 0;">Line ${d.line}:</span>
+                <span style="color: #c9d1d9; flex: 1; word-break: break-word;">${escapeHtml(d.reason || d.kind)}</span>
+                ${v.file_path ? `<button onclick="openInEditor(${htmlJs(v.file_path)}, ${d.line}, event)" style="background: none; border: none; color: #58a6ff; cursor: pointer; font-size: 10px; flex-shrink: 0;">✎</button>` : ''}
+              </div>
+            `).join("")}
+          </div>
+        </div>
+        ` : ''}
 
         <div style="display: flex; gap: 6px; flex-wrap: wrap;">
           <button class="btn btn-sm" onclick="askAgentToFixForViolation(${htmlJs(v.from_class)}, ${htmlJs(v.to_class)}, event)" style="font-size: 11px; padding: 4px 10px; background: #238636; border-color: #2ea043; color: #fff;">
@@ -1400,6 +1582,12 @@ function switchTab(tabId) {
 
   if (targetBtn) targetBtn.classList.add("active");
   if (targetContent) targetContent.classList.add("active");
+
+  if (tabId === "tab-violations") {
+    // When opening the Violations tab, all categories should be collapsed
+    expandedViolationCategories.clear();
+    toggleAllViolationCategories(false);
+  }
 }
 
 function escapeHtml(str) {

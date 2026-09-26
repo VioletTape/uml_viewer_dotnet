@@ -57,15 +57,25 @@ uml stop
 - **Autonomous Headless AI Agent**: Continuously watches `.uml-viewer/tasks.json` and evaluates What-If architecture proposals, DIP decoupling suggestions, and architectural rationales in the background.
 - **Interactive What-If Simulation**: Preview architectural decoupling proposals (`📐 Arch Mode`) live on canvas before touching source code.
 - **Code Coverage & Quality Radar**: Integrates Coverlet/Cobertura XML coverage with Cyclomatic Complexity to compute **CRAP** (Change Risk Analysis and Predictions) risk pills for every class and method.
+- **Operational Resilience & Stability Radar (Michael Nygard / Polly)**:
+  - Automatically flags **Unbounded Timeouts** (default 100s `HttpClient`), **Missing Cancellation Tokens**, and **Catch-All Exception Retries**.
+  - Correlates with Kubernetes manifests (`override.yaml`, `workload.yaml`) to detect multi-replica **"Killed by the Mob"** dogpiling risks when unjittered retries are used.
+  - See the complete [Stability Patterns & Operational Resilience Guide](docs/stability-patterns.md).
 - **Clean Architecture Policy Enforcement**: Flags Dependency Rule violations, Circular Dependencies (ADP), and Framework Taint.
 - **Deep Inspector**:
   - Focuses selected classes with geometric auto-centering.
-  - Interactive Clean Architecture violation cards with `🤖 Fix with AI`, `💡 Explain with AI`, and `✎ Open in VS Code`.
+  - Interactive Clean Architecture & Stability violation cards with `🤖 Fix with AI`, `💡 Explain with AI`, and `✎ Open in VS Code`.
 - **Namespace Drill-Down**: Open namespace cards to reveal child namespaces and
   classes. Breadcrumbs, **Up**, and **Esc** navigate back. Dependencies are
   bundled between groups; connected namespaces outside the current scope remain
   visible as dashed cards. Selecting a violation opens its class's namespace.
 - **VS Code Deep-Linking**: One-click jump to file and line in VS Code inside WSL.
+
+---
+
+## 📚 Documentation
+
+- [Stability Patterns & Operational Resilience Guide](docs/stability-patterns.md) — Comprehensive guide on interpreting stability findings, blast radius impact, Kubernetes replica correlation, and on-demand AI usage.
 
 ---
 
@@ -75,7 +85,8 @@ uml stop
 - `GET /api/events`: Server-Sent Events (SSE) live-stream pushing graph reloads, proposal updates, and agent status.
 - `GET /api/agent/tasks` & `POST /api/agent/tasks`: Queue and retrieve background AI agent tasks.
 - `GET /api/agent/proposals`: Retrieve stored What-If simulation proposals.
+- `POST /api/stability/recheck`: Busts cache and forces instant re-evaluation of stability patterns.
 - `POST /api/open`: Launches local VS Code to file path and line.
 
 Run regression checks with `python3 -m unittest discover -v` and
-`node test_frontend.js`.
+`node tests/test_frontend.js`.
