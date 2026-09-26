@@ -148,10 +148,14 @@ Stability findings display with a severity rating (`ERROR` or `WARNING`), the of
 ---
 
 #### 4. Catch-All Exception Retries (`generic_exception_retry`)
+
 * **What the Radar Found**: A retry policy catches generic `System.Exception` or unconstrained error filters instead of transient network/HTTP exceptions.
+
 * **Why It Is Dangerous**: Non-transient errors (e.g. `400 Bad Request`, `401 Unauthorized`, database constraint violations, or `NullReferenceException`) will never succeed on a retry. Retrying them wastes compute, delays error feedback to users, clutters audit logs, and risks executing duplicate unintended side-effects on non-idempotent operations.
+
 * **How to Resolve**: Filter strictly for transient failures:
-  ```csharp
+
+```csharp
 // Only retry transient network failures and 5xx / 429 status codes
   builder.AddRetry(new HttpRetryStrategyOptions
   {
@@ -161,11 +165,12 @@ Stability findings display with a severity rating (`ERROR` or `WARNING`), the of
                                res.StatusCode == HttpStatusCode.TooManyRequests ||
                                (int)res.StatusCode >= 500)
   });
-  ```
+```
 
 ---
 
 #### 5. Suspicious Custom Resilience Loops (`suspicious_custom_resilience`)
+
 * **What the Radar Found**: A hand-rolled `for`/`while` loop wrapping an external I/O anchor (`HttpClient`, `DbContext`, Dapper, Redis, or Message Broker) with `Thread.Sleep`, `Task.Delay`, or retry counters; OR a naive `Task.WhenAny` timeout wrapper without linked cancellation.
 * **Why Hand-Rolled Resilience is Hazardous**:
   1. **Threadpool Starvation**: Tailor-made retry loops frequently use blocking `Thread.Sleep(1000)`. In ASP.NET Core, synchronous sleep starves the worker threadpool, converting a minor downstream latency bump into immediate process-wide unresponsive outages.
