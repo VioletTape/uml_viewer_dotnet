@@ -408,6 +408,48 @@ public class ComplexService {
         cycle_violations = [v for v in res["violations"] if v.get("category") == "cycle"]
         self.assertEqual(len(cycle_violations), 1)
 
+    def test_step4_file_io_and_stat_fingerprinting(self):
+        from stability_store import StabilityStore, compute_file_fingerprint
+        from stability_analyzer import StabilityAnalyzer
+
+        # Verify compute_file_fingerprint
+        test_cs = self.project / "FingerprintTest.cs"
+        test_cs.write_text("class FingerprintTest {}")
+        fp1 = compute_file_fingerprint(str(test_cs))
+        self.assertIsNotNone(fp1)
+        self.assertIn(":", fp1)
+
+        # Verify StabilityStore fast signature
+        store = StabilityStore(str(self.project))
+        hashes, sig1 = store.compute_project_signature()
+        self.assertIn("FingerprintTest.cs", hashes)
+        self.assertEqual(hashes["FingerprintTest.cs"], fp1)
+
+        store.save_findings([{"kind": "test_finding"}])
+        self.assertTrue(store.is_cache_valid())
+
+        # Modify file and verify cache invalidates
+        test_cs.write_text("class FingerprintTest { int x = 1; }")
+        fp2 = compute_file_fingerprint(str(test_cs))
+        self.assertNotEqual(fp1, fp2)
+        self.assertFalse(store.is_cache_valid())
+
+        # Verify StabilityAnalyzer directory pruning skips .git and bin
+        git_dir = self.project / ".git" / "objects"
+        git_dir.mkdir(parents=True, exist_ok=True)
+        (git_dir / "GitFake.cs").write_text("class GitFake {}")
+
+        bin_dir = self.project / "bin" / "Debug"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        (bin_dir / "BinFake.cs").write_text("class BinFake {}")
+
+        analyzer = StabilityAnalyzer(str(self.project))
+        findings = analyzer.evaluate_project_stability([], force_recheck=True)
+        # Findings should not include classes from .git or bin
+        finding_classes = [f.get("from_class") for f in findings]
+        self.assertNotIn("GitFake", finding_classes)
+        self.assertNotIn("BinFake", finding_classes)
+
 
 if __name__ == "__main__":
     unittest.main()

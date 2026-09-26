@@ -29,6 +29,15 @@ def compute_file_hash(path: str) -> Optional[str]:
         return None
 
 
+def compute_file_fingerprint(path: str) -> Optional[str]:
+    """Computes fast stat-based fingerprint (mtime_ns:size) without reading full file bytes."""
+    try:
+        st = os.stat(path)
+        return f"{st.st_mtime_ns}:{st.st_size}"
+    except Exception:
+        return None
+
+
 class StabilityStore:
     def __init__(self, project_path: str):
         self.project_path = os.path.abspath(project_path)
@@ -54,9 +63,10 @@ class StabilityStore:
                         relevant.append(fpath)
         return sorted(relevant)
 
-    def compute_project_signature(self) -> Tuple[Dict[str, str], str]:
+    def compute_project_signature(self, fast: bool = True) -> Tuple[Dict[str, str], str]:
         """
-        Computes hashes for all relevant source and infra files.
+        Computes signatures for all relevant source and infra files.
+        If fast=True, uses mtime_ns:size stat fingerprints avoiding reading whole files.
         Returns (file_hashes_dict, combined_signature_hash).
         """
         files = self._get_relevant_files()
@@ -65,7 +75,7 @@ class StabilityStore:
 
         for fpath in files:
             rel = os.path.relpath(fpath, self.project_path)
-            fhash = compute_file_hash(fpath)
+            fhash = compute_file_fingerprint(fpath) if fast else compute_file_hash(fpath)
             if fhash:
                 file_hashes[rel] = fhash
                 combined.update(f"{rel}:{fhash}".encode("utf-8"))
@@ -73,8 +83,11 @@ class StabilityStore:
         # Also include .codegraph/codegraph.db modification time if it exists
         cg_db = os.path.join(self.project_path, ".codegraph", "codegraph.db")
         if os.path.isfile(cg_db):
-            mtime = str(os.path.getmtime(cg_db))
-            combined.update(f"codegraph.db:{mtime}".encode("utf-8"))
+            try:
+                st = os.stat(cg_db)
+                combined.update(f"codegraph.db:{st.st_mtime_ns}:{st.st_size}".encode("utf-8"))
+            except Exception:
+                pass
 
         return file_hashes, combined.hexdigest()
 
@@ -112,11 +125,18 @@ class StabilityStore:
             "total_findings": len(findings),
             "file_count": len(file_hashes)
         }
+        temp_file = f"{self.cache_file}.{os.getpid()}.tmp"
         try:
-            with open(self.cache_file, "w", encoding="utf-8") as f:
+            with open(temp_file, "w", encoding="utf-8") as f:
                 json.dump(cache_meta, f, indent=2)
+            os.replace(temp_file, self.cache_file)
         except Exception as e:
             print(f"[StabilityStore] Failed to write cache metadata: {e}")
+            if os.path.exists(temp_file):
+                try:
+                    os.remove(temp_file)
+                except OSError:
+                    pass
 
     def invalidate_cache(self):
         """Forces cache invalidation to trigger re-evaluation."""

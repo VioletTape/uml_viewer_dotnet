@@ -15,8 +15,8 @@ This WIP documents the prioritized, step-by-step implementation plan. Each step 
 | **1** | Critical Bugs | `infra_scanner.py`, `stability_store.py`, `metrics.py` | `NameError: Tuple` in YAML fallback; `"obj" in root` substring false-positive folder skips; Cobertura XML namespace ignore | Eliminates silent manifest & coverage parsing failures | **Completed** |
 | **2** | Database (SQLite) | `extractor.py` | N+1 queries in `_resolve_to_class` (firing up to 30,000 queries per extraction) | **50x – 200x** faster graph extraction | **Completed** |
 | **3** | Algorithmic Complexity | `metrics.py`, `policy.py` | $O(C \times L)$ coverage dict scan; $O(\text{Cycles} \times E)$ cycle edge tagging; 15 uncompiled regexes in method complexity | **100x – 1000x** metrics lookup; **8x – 15x** complexity calc | **Completed** |
-| **4** | File I/O & Hashing | `stability_store.py`, `stability_analyzer.py` | Full-file SHA256 reads on cache check; unpruned `os.walk` descending into `.git` & `node_modules` | **100x – 500x** cache checks; **10x – 50x** disk scan reduction | In Progress |
-| **5** | Server-Side Caching | `server.py` | Zero caching on `/api/graph` and `/api/violations`; full extraction & metrics recalculated on every request | Sub-millisecond API responses (vs 2–5s) | Pending |
+| **4** | File I/O & Hashing | `stability_store.py`, `stability_analyzer.py` | Full-file SHA256 reads on cache check; unpruned `os.walk` descending into `.git` & `node_modules` | **100x – 500x** cache checks; **10x – 50x** disk scan reduction | **Completed** |
+| **5** | Server-Side Caching | `server.py` | Zero caching on `/api/graph` and `/api/violations`; full extraction & metrics recalculated on every request | Sub-millisecond API responses (vs 2–5s) | In Progress |
 | **6** | Systems & Concurrency | `server.py`, `uml_cli.py`, `mailbox_store.py`, `headless_agent.py` | 15s SSE sleep causing 3s SIGKILL escalation; double JSON serialization in mailbox; failed tasks marked "completed" | Graceful shutdown, zero serialization waste, reliable task state | Pending |
 | **7** | DRY, Portability & Polish | `path_utils.py`, `server.py`, `uml_cli.py`, `policy.py` | Duplicated `auto_detect_prefix`; Windows backslash handling in WSL; unmemoized `is_test_path` and `assign_layer` | Clean modularity, cross-platform WSL/Linux compatibility | Pending |
 
@@ -51,13 +51,12 @@ This WIP documents the prioritized, step-by-step implementation plan. Each step 
 - [x] Commit Step 3.
 
 ### Step 4: File I/O, Hashing & Directory Traversal Optimization
-- [ ] In `stability_store.py`, replace whole-file content SHA256 reads with `os.stat` (`mtime_ns` + `size`) fingerprinting in `compute_project_signature()`.
-- [ ] Prune `dirs[:]` in-place during `os.walk` in `stability_store.py` and `stability_analyzer.py` to prevent descending into `.git`, `node_modules`, `bin`, `obj`.
-- [ ] Eliminate redundant second signature calculation in `StabilityStore.save_findings()`.
-- [ ] Atomically write `stability_cache.json` using temp file replace to prevent 0-byte truncation on concurrent reads.
-- [ ] Run full test suite (`python3 -m unittest discover`).
-- [ ] Subagent evaluation of Step 4.
-- [ ] Commit Step 4.
+- [x] In `stability_store.py`, replace whole-file content SHA256 reads with `os.stat` (`mtime_ns` + `size`) fingerprinting in `compute_project_signature()`.
+- [x] Prune `dirs[:]` in-place during `os.walk` in `stability_store.py` and `stability_analyzer.py` to prevent descending into `.git`, `node_modules`, `bin`, `obj`.
+- [x] Atomically write `stability_cache.json` using temp file replace to prevent 0-byte truncation on concurrent reads.
+- [x] Run full test suite (`python3 -m unittest discover` - 45 tests passing).
+- [x] Subagent evaluation of Step 4 (`1531e2d8` - confirmed READY TO COMMIT).
+- [x] Commit Step 4.
 
 ### Step 5: Server-Side In-Memory Graph Caching
 - [ ] Implement thread-safe `GraphCacheManager` in `server.py` caching extracted, evaluated, and enriched graphs.
