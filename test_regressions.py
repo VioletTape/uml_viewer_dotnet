@@ -4,12 +4,13 @@ from concurrent.futures import ThreadPoolExecutor
 import copy
 import io
 import json
+import os
 from pathlib import Path
 import sqlite3
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import mock_open, patch
+from unittest.mock import mock_open, patch, MagicMock
 from urllib.parse import urlencode
 
 from extractor import CodeGraphExtractor
@@ -482,6 +483,83 @@ public class ComplexService {
             status3, _, body3 = self.request("/api/graph")
             self.assertEqual(status3, 200)
             self.assertEqual(extractor_mock.return_value.extract.call_count, 2)
+
+    def test_step6_concurrency_and_systems_hardening(self):
+        from mailbox_store import mailbox
+        from headless_agent import HeadlessAgentWorker
+        from server import broadcast_shutdown, subscribers, subscribers_lock
+        import queue
+
+        # 1. Test mailbox read_only does not touch or rewrite file
+        tasks_file = self.project / ".uml-viewer" / "test_tasks.json"
+        with mailbox(str(self.project), "test_tasks.json") as items:
+            items.append({"id": "t1", "status": "pending"})
+        mtime_before = tasks_file.stat().st_mtime_ns
+
+        with mailbox(str(self.project), "test_tasks.json", read_only=True) as items:
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["id"], "t1")
+        mtime_after = tasks_file.stat().st_mtime_ns
+        self.assertEqual(mtime_before, mtime_after)
+
+        # 2. Test headless_agent records 'failed' on task exception
+        with mailbox(str(self.project), "tasks.json") as tasks:
+            tasks.append({"id": "task-fail-1", "title": "Failing Task", "status": "pending", "op": "bad_op"})
+
+        worker = HeadlessAgentWorker(str(self.project))
+        with patch.object(worker, "_handle_fix_violation", side_effect=RuntimeError("Simulated LLM Failure")):
+            # Trigger failing op
+            with mailbox(str(self.project), "tasks.json") as tasks:
+                t = next(x for x in tasks if x["id"] == "task-fail-1")
+                t["op"] = "fix_violation"
+
+            worker._process_single_task("task-fail-1")
+
+        with mailbox(str(self.project), "tasks.json", read_only=True) as tasks:
+            failed_task = next(x for x in tasks if x["id"] == "task-fail-1")
+            self.assertEqual(failed_task.get("status"), "failed")
+            self.assertIn("Simulated LLM Failure", failed_task.get("result", ""))
+
+        # 3. Test broadcast_shutdown unblocks SSE subscriber queues with None sentinel
+        test_q = queue.Queue()
+        with subscribers_lock:
+            subscribers.add(test_q)
+        try:
+            broadcast_shutdown()
+            sentinel = test_q.get_nowait()
+            self.assertIsNone(sentinel)
+        finally:
+            with subscribers_lock:
+                subscribers.discard(test_q)
+
+        # 4. Test file size limit (>5MB) in _handle_get_file
+        large_file = self.project / "large_file.cs"
+        large_file.write_text("class Huge {}")
+        orig_stat = os.stat
+        def fake_stat(path, *args, **kwargs):
+            st = orig_stat(path, *args, **kwargs)
+            if str(path).endswith("large_file.cs"):
+                fake_tuple = (
+                    st.st_mode, st.st_ino, st.st_dev, st.st_nlink,
+                    st.st_uid, st.st_gid, 6 * 1024 * 1024,
+                    int(st.st_atime), int(st.st_mtime), int(st.st_ctime)
+                )
+                return os.stat_result(fake_tuple)
+            return st
+
+        with patch("server.os.stat", side_effect=fake_stat):
+            status, _, body_bytes = self.request("/api/file?path=large_file.cs")
+            self.assertEqual(status, 413)
+            self.assertIn(b"File too large", body_bytes)
+
+        # 5. Test orphaned task reconciliation on agent startup
+        with mailbox(str(self.project), "tasks.json") as tasks:
+            tasks.append({"id": "task-orphan-1", "title": "Orphaned Task", "status": "in_progress"})
+        new_worker = HeadlessAgentWorker(str(self.project))
+        new_worker._reconcile_orphaned_tasks()
+        with mailbox(str(self.project), "tasks.json", read_only=True) as tasks:
+            orphaned = next(x for x in tasks if x["id"] == "task-orphan-1")
+            self.assertEqual(orphaned.get("status"), "pending")
 
 
 if __name__ == "__main__":

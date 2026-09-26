@@ -42,7 +42,28 @@ def is_viewer_process(pid: int) -> bool:
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             args = f.read().split(b"\0")
-        return len(args) > 1 and os.fsdecode(args[1]) == SERVER_PY
+        if len(args) <= 1:
+            return False
+
+        arg1 = os.fsdecode(args[1])
+        if not (arg1 == SERVER_PY or os.path.abspath(arg1) == os.path.abspath(SERVER_PY)):
+            return False
+
+        # If matching command line, check that process is not defunct/zombie
+        status_file = f"/proc/{pid}/status"
+        if os.path.exists(status_file):
+            try:
+                with open(status_file, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        if line.startswith("State:"):
+                            state_parts = line.split()
+                            if len(state_parts) > 1 and state_parts[1].upper() in ("Z", "X"):
+                                return False
+                            break
+            except (OSError, UnicodeDecodeError):
+                pass
+
+        return True
     except OSError:
         return False
 

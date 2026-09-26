@@ -1,38 +1,62 @@
 """Locked, atomic JSON mailbox updates shared by the HTTP server and worker."""
 
 from contextlib import contextmanager
-import fcntl
 import json
 import os
 from pathlib import Path
 import tempfile
 
+try:
+    import fcntl
+    HAS_FCNTL = True
+except ImportError:
+    HAS_FCNTL = False
+
 
 @contextmanager
-def mailbox(project_path, name):
+def mailbox(project_path, name, read_only=False):
     directory = Path(project_path) / ".uml-viewer"
     directory.mkdir(exist_ok=True)
     path = directory / name
+    lock_file = directory / (name + ".lock")
     # Lock a separate file: atomic replacement changes the JSON file's inode.
-    with (directory / (name + ".lock")).open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with lock_file.open("a") as lock:
+        if HAS_FCNTL:
+            flags = fcntl.LOCK_SH if read_only else fcntl.LOCK_EX
+            fcntl.flock(lock, flags)
         try:
-            items = json.loads(path.read_text()) if path.exists() else []
+            if path.exists():
+                raw = path.read_text(encoding="utf-8")
+                items = json.loads(raw)
+            else:
+                raw = ""
+                items = []
+
             if not isinstance(items, list):
                 raise ValueError(f"Invalid mailbox: {name} must contain a JSON list")
-            original = json.dumps(items)
+
+            if read_only:
+                yield items
+                return
+
             yield items
-            if json.dumps(items) != original:
+
+            new_raw = json.dumps(items, indent=2)
+            if new_raw != raw:
                 temporary = None
                 try:
                     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory, delete=False) as f:
                         temporary = f.name
-                        json.dump(items, f, indent=2)
+                        f.write(new_raw)
                         f.flush()
                         os.fsync(f.fileno())
                     os.replace(temporary, path)
                 finally:
                     if temporary and os.path.exists(temporary):
-                        os.unlink(temporary)
+                        try:
+                            os.unlink(temporary)
+                        except OSError:
+                            pass
         finally:
-            fcntl.flock(lock, fcntl.LOCK_UN)
+            if HAS_FCNTL:
+                fcntl.flock(lock, fcntl.LOCK_UN)

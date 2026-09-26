@@ -89,6 +89,18 @@ def notify_all(event_data: Dict):
         for q in list(subscribers):
             try:
                 q.put_nowait(event_data)
+            except queue.Full:
+                pass
+            except Exception:
+                pass
+
+
+def broadcast_shutdown():
+    """Wakes up and unblocks all SSE subscriber queues on server shutdown."""
+    with subscribers_lock:
+        for q in list(subscribers):
+            try:
+                q.put_nowait(None)
             except Exception:
                 pass
 
@@ -431,21 +443,28 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(b"data: {\"type\": \"connected\", \"message\": \"Live-sync active\"}\n\n")
         self.wfile.flush()
 
-        client_queue = queue.Queue()
+        client_queue = queue.Queue(maxsize=128)
         with subscribers_lock:
             subscribers.add(client_queue)
 
+        last_heartbeat = time.time()
         try:
             while not server_stopping:
                 try:
-                    payload = client_queue.get(timeout=15.0)
+                    payload = client_queue.get(timeout=1.0)
+                    if payload is None or server_stopping:
+                        break
                     line = f"data: {json.dumps(payload)}\n\n".encode("utf-8")
                     self.wfile.write(line)
                     self.wfile.flush()
                 except queue.Empty:
-                    # Keep-alive heartbeat comment
-                    self.wfile.write(b": keep-alive\n\n")
-                    self.wfile.flush()
+                    if server_stopping:
+                        break
+                    now = time.time()
+                    if now - last_heartbeat >= 15.0:
+                        self.wfile.write(b": keep-alive\n\n")
+                        self.wfile.flush()
+                        last_heartbeat = now
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
@@ -453,7 +472,7 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
                 subscribers.discard(client_queue)
 
     def _get_agent_tasks(self):
-        with mailbox(self.project_path, "tasks.json") as tasks:
+        with mailbox(self.project_path, "tasks.json", read_only=True) as tasks:
             return tasks
 
     def _get_proposals(self):
@@ -698,16 +717,26 @@ class ArchitectureHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         try:
+            st = os.stat(abs_path)
+            if st.st_size > 5 * 1024 * 1024:
+                self.send_response(413)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": f"File too large (>5MB): {abs_path}"}).encode("utf-8"))
+                return
+
             with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
 
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({
+            body = json.dumps({
                 "path": abs_path,
                 "content": content
-            }).encode("utf-8"))
+            }).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         except Exception as e:
             self.send_response(500)
             self.send_header("Content-Type", "application/json")
@@ -801,12 +830,14 @@ def run_server(project_path: str, prefix: str = "", policy_path: str = "", port:
     sys.stdout.flush()
 
     http.server.ThreadingHTTPServer.allow_reuse_address = True
+    http.server.ThreadingHTTPServer.daemon_threads = True
     with http.server.ThreadingHTTPServer(("127.0.0.1", port), ArchitectureHandler) as httpd:
         def shutdown_sig(sig, frame):
             nonlocal httpd
             global server_stopping
             print(f"\nReceived signal {sig}. Shutting down server...")
             server_stopping = True
+            broadcast_shutdown()
             if ArchitectureHandler.agent_worker:
                 ArchitectureHandler.agent_worker.stop()
             threading.Thread(target=httpd.shutdown).start()
@@ -820,6 +851,7 @@ def run_server(project_path: str, prefix: str = "", policy_path: str = "", port:
             pass
         finally:
             server_stopping = True
+            broadcast_shutdown()
             if ArchitectureHandler.agent_worker:
                 ArchitectureHandler.agent_worker.stop()
 

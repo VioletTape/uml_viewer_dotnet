@@ -17,8 +17,8 @@ This WIP documents the prioritized, step-by-step implementation plan. Each step 
 | **3** | Algorithmic Complexity | `metrics.py`, `policy.py` | $O(C \times L)$ coverage dict scan; $O(\text{Cycles} \times E)$ cycle edge tagging; 15 uncompiled regexes in method complexity | **100x – 1000x** metrics lookup; **8x – 15x** complexity calc | **Completed** |
 | **4** | File I/O & Hashing | `stability_store.py`, `stability_analyzer.py` | Full-file SHA256 reads on cache check; unpruned `os.walk` descending into `.git` & `node_modules` | **100x – 500x** cache checks; **10x – 50x** disk scan reduction | **Completed** |
 | **5** | Server-Side Caching | `server.py` | Zero caching on `/api/graph` and `/api/violations`; full extraction & metrics recalculated on every request | Sub-millisecond API responses (vs 2–5s) | **Completed** |
-| **6** | Systems & Concurrency | `server.py`, `uml_cli.py`, `mailbox_store.py`, `headless_agent.py` | 15s SSE sleep causing 3s SIGKILL escalation; double JSON serialization in mailbox; failed tasks marked "completed" | Graceful shutdown, zero serialization waste, reliable task state | In Progress |
-| **7** | DRY, Portability & Polish | `path_utils.py`, `server.py`, `uml_cli.py`, `policy.py` | Duplicated `auto_detect_prefix`; Windows backslash handling in WSL; unmemoized `is_test_path` and `assign_layer` | Clean modularity, cross-platform WSL/Linux compatibility | Pending |
+| **6** | Systems & Concurrency | `server.py`, `uml_cli.py`, `mailbox_store.py`, `headless_agent.py` | 15s SSE sleep causing 3s SIGKILL escalation; double JSON serialization in mailbox; failed tasks marked "completed" | Graceful shutdown, zero serialization waste, reliable task state | **Completed** |
+| **7** | DRY, Portability & Polish | `path_utils.py`, `server.py`, `uml_cli.py`, `policy.py` | Duplicated `auto_detect_prefix`; Windows backslash handling in WSL; unmemoized `is_test_path` and `assign_layer` | Clean modularity, cross-platform WSL/Linux compatibility | In Progress |
 
 ---
 
@@ -67,14 +67,14 @@ This WIP documents the prioritized, step-by-step implementation plan. Each step 
 - [x] Commit Step 5.
 
 ### Step 6: Systems, Concurrency & Lifecycle Hardening
-- [ ] Set `ThreadingHTTPServer.daemon_threads = True` and broadcast `None` sentinel on server shutdown to unblock SSE worker threads immediately and avoid 3-second SIGKILL escalation in `uml_cli.py`.
-- [ ] Add bounded capacity and slow consumer eviction to SSE client queues (`maxsize=128`).
-- [ ] Refactor `mailbox_store.py` to eliminate double JSON dump on read-only access.
-- [ ] Fix task lifecycle in `headless_agent.py`: record `"failed"` instead of `"completed"` on exceptions; reconcile orphaned `"in_progress"` tasks on startup.
-- [ ] Add 5MB file size limit and explicit `Content-Length` header in `server.py:_handle_get_file`.
-- [ ] Run full test suite (`python3 -m unittest discover`).
-- [ ] Subagent evaluation of Step 6.
-- [ ] Commit Step 6.
+- [x] Set `ThreadingHTTPServer.daemon_threads = True` and broadcast `None` sentinel on server shutdown to unblock SSE worker threads immediately and avoid 3-second SIGKILL escalation in `uml_cli.py`.
+- [x] Add bounded capacity and slow consumer eviction to SSE client queues (`maxsize=128`).
+- [x] Refactor `mailbox_store.py` to eliminate double JSON dump on read-only access.
+- [x] Fix task lifecycle in `headless_agent.py`: record `"failed"` instead of `"completed"` on exceptions; reconcile orphaned `"in_progress"` tasks on startup.
+- [x] Add 5MB file size limit and explicit `Content-Length` header in `server.py:_handle_get_file`.
+- [x] Run full test suite (`python3 -m unittest discover` - 47 tests passing).
+- [x] Subagent evaluation of Step 6 (`9a46bd41` - confirmed READY TO COMMIT).
+- [x] Commit Step 6.
 
 ### Step 7: DRY, Portability & Polish
 - [ ] Consolidate `auto_detect_prefix()` into `path_utils.py` and import it in `server.py` and `uml_cli.py`.
