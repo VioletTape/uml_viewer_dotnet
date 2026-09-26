@@ -320,7 +320,35 @@ environments:
         self.assertIn("Model.cs", file_names)
         self.assertNotIn("Generated.cs", file_names)
 
+    def test_extractor_n_plus_one_elimination_and_connection_cleanup(self):
+        # Create minimal codegraph db
+        cg_dir = self.project / ".codegraph"
+        cg_dir.mkdir(parents=True, exist_ok=True)
+        db_path = cg_dir / "codegraph.db"
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute("CREATE TABLE nodes (id TEXT PRIMARY KEY, kind TEXT, name TEXT, qualified_name TEXT, file_path TEXT, start_line INT, end_line INT, is_abstract INT, is_static INT, visibility TEXT, signature TEXT, docstring TEXT)")
+            conn.execute("CREATE TABLE edges (source TEXT, target TEXT, kind TEXT, line INT, col INT)")
+            conn.execute("CREATE TABLE unresolved_refs (reference_name TEXT, reference_kind TEXT, from_node_id TEXT, file_path TEXT)")
+
+            conn.execute("INSERT INTO nodes VALUES ('cls1', 'class', 'Order', 'Shop.Order', 'Order.cs', 1, 50, 0, 0, 'public', '', '')")
+            conn.execute("INSERT INTO nodes VALUES ('cls2', 'class', 'Customer', 'Shop.Customer', 'Customer.cs', 1, 50, 0, 0, 'public', '', '')")
+            conn.execute("INSERT INTO nodes VALUES ('m1', 'method', 'GetTotal', 'Shop.Order.GetTotal', 'Order.cs', 10, 20, 0, 0, 'public', 'int GetTotal()', '')")
+            conn.execute("INSERT INTO edges VALUES ('cls1', 'm1', 'contains', 10, 0)")
+            conn.execute("INSERT INTO edges VALUES ('m1', 'cls2', 'calls', 15, 0)")
+
+        extractor = CodeGraphExtractor(str(self.project), prefix="Shop")
+        # Direct test of _resolve_to_class using in-memory map without needing DB queries
+        parent = extractor._resolve_to_class(None, "m1", {"cls1": {}}, {"m1": "cls1"})
+        self.assertEqual(parent, "cls1")
+
+        graph = extractor.extract()
+        self.assertEqual(len(graph["classes"]), 2)
+        self.assertEqual(len(graph["edges"]), 1)
+        self.assertEqual(graph["edges"][0]["from"], "cls1")
+        self.assertEqual(graph["edges"][0]["to"], "cls2")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

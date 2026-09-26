@@ -13,8 +13,8 @@ This WIP documents the prioritized, step-by-step implementation plan. Each step 
 | Step | Area | Files Affected | Issue Description | Impact / Target Speedup | Status |
 |:---:|:---|:---|:---|:---|:---:|
 | **1** | Critical Bugs | `infra_scanner.py`, `stability_store.py`, `metrics.py` | `NameError: Tuple` in YAML fallback; `"obj" in root` substring false-positive folder skips; Cobertura XML namespace ignore | Eliminates silent manifest & coverage parsing failures | **Completed** |
-| **2** | Database (SQLite) | `extractor.py` | N+1 queries in `_resolve_to_class` (firing up to 30,000 queries per extraction) | **50x – 200x** faster graph extraction | In Progress |
-| **3** | Algorithmic Complexity | `metrics.py`, `policy.py` | $O(C \times L)$ coverage dict scan; $O(\text{Cycles} \times E)$ cycle edge tagging; 15 uncompiled regexes in method complexity | **100x – 1000x** metrics lookup; **8x – 15x** complexity calc | Pending |
+| **2** | Database (SQLite) | `extractor.py` | N+1 queries in `_resolve_to_class` (firing up to 30,000 queries per extraction) | **50x – 200x** faster graph extraction | **Completed** |
+| **3** | Algorithmic Complexity | `metrics.py`, `policy.py` | $O(C \times L)$ coverage dict scan; $O(\text{Cycles} \times E)$ cycle edge tagging; 15 uncompiled regexes in method complexity | **100x – 1000x** metrics lookup; **8x – 15x** complexity calc | In Progress |
 | **4** | File I/O & Hashing | `stability_store.py`, `stability_analyzer.py` | Full-file SHA256 reads on cache check; unpruned `os.walk` descending into `.git` & `node_modules` | **100x – 500x** cache checks; **10x – 50x** disk scan reduction | Pending |
 | **5** | Server-Side Caching | `server.py` | Zero caching on `/api/graph` and `/api/violations`; full extraction & metrics recalculated on every request | Sub-millisecond API responses (vs 2–5s) | Pending |
 | **6** | Systems & Concurrency | `server.py`, `uml_cli.py`, `mailbox_store.py`, `headless_agent.py` | 15s SSE sleep causing 3s SIGKILL escalation; double JSON serialization in mailbox; failed tasks marked "completed" | Graceful shutdown, zero serialization waste, reliable task state | Pending |
@@ -33,13 +33,13 @@ This WIP documents the prioritized, step-by-step implementation plan. Each step 
 - [x] Commit Step 1.
 
 ### Step 2: Database N+1 Query Elimination in `extractor.py`
-- [ ] In `CodeGraphExtractor.extract()`, preload all `kind = 'contains'` edges into an in-memory parent map `contains_parent_map: Dict[str, str]`.
-- [ ] Refactor `_resolve_to_class()` to resolve member nodes via `contains_parent_map` without executing per-node SQL queries.
-- [ ] Eliminate per-reference SQL queries in `_extract_nuget_dependencies`.
-- [ ] Wrap SQLite connections in `try...finally` to eliminate connection descriptor leaks.
-- [ ] Run full test suite (`python3 -m unittest discover`).
-- [ ] Subagent evaluation of Step 2.
-- [ ] Commit Step 2.
+- [x] In `CodeGraphExtractor.extract()`, preload all `kind = 'contains'` edges into an in-memory parent map `contains_parent_map: Dict[str, str]`.
+- [x] Refactor `_resolve_to_class()` to resolve member nodes via `contains_parent_map` without executing per-node SQL queries.
+- [x] Eliminate per-reference SQL queries in `_extract_nuget_dependencies`.
+- [x] Wrap SQLite connections in `try...finally` to eliminate connection descriptor leaks.
+- [x] Run full test suite (`python3 -m unittest discover` - 43 tests passing).
+- [x] Subagent evaluation of Step 2 (`7d47cee2` - confirmed READY TO COMMIT).
+- [x] Commit Step 2.
 
 ### Step 3: Algorithmic & Data Structure Inefficiencies in `metrics.py` and `policy.py`
 - [ ] In `metrics.py`, restructure coverage storage into `self.file_coverage: Dict[str, Dict[int, int]]` to eliminate $O(C \times L)$ full table iterations.

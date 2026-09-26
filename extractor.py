@@ -10,6 +10,8 @@ import xml.etree.ElementTree as ET
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
+_RE_VALID_IDENT = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$')
+
 
 class CodeGraphExtractor:
     def __init__(self, project_path: str, prefix: str = "", just_my_code: bool = True):
@@ -71,6 +73,12 @@ class CodeGraphExtractor:
     def extract(self) -> Dict:
         """Extracts nodes and edges from SQLite database."""
         conn = self._connect()
+        try:
+            return self._extract_internal(conn)
+        finally:
+            conn.close()
+
+    def _extract_internal(self, conn: sqlite3.Connection) -> Dict:
         cursor = conn.cursor()
 
         # 1. Fetch internal types (class, interface, struct, enum)
@@ -112,6 +120,10 @@ class CodeGraphExtractor:
             nodes_by_id[row["id"]] = node_data
             classes.append(node_data)
 
+        # Preload 'contains' edges so member -> class resolution is in-memory O(1) (eliminates N+1 queries)
+        cursor.execute("SELECT target, source FROM edges WHERE kind = 'contains'")
+        contains_parent_map: Dict[str, str] = {row["target"]: row["source"] for row in cursor.fetchall()}
+
         # 2. Fetch members (methods, properties, fields) for internal types
         if nodes_by_id:
             cursor.execute("""
@@ -149,10 +161,9 @@ class CodeGraphExtractor:
             tgt_id = row["target"]
             kind = row["kind"]
 
-            # Map method/member-level edges to parent class if necessary
-            # (In codegraph, calls often come from method nodes)
-            src_class_id = self._resolve_to_class(conn, src_id, nodes_by_id)
-            tgt_class_id = self._resolve_to_class(conn, tgt_id, nodes_by_id)
+            # Map method/member-level edges to parent class via in-memory contains_parent_map
+            src_class_id = self._resolve_to_class(conn, src_id, nodes_by_id, contains_parent_map)
+            tgt_class_id = self._resolve_to_class(conn, tgt_id, nodes_by_id, contains_parent_map)
 
             if not src_class_id or not tgt_class_id:
                 continue
@@ -175,9 +186,7 @@ class CodeGraphExtractor:
                 })
 
         # 4. Extract external NuGet dependencies from unresolved_refs
-        external_packages = self._extract_nuget_dependencies(conn, nodes_by_id)
-
-        conn.close()
+        external_packages = self._extract_nuget_dependencies(conn, nodes_by_id, contains_parent_map)
 
         return {
             "project_path": self.project_path,
@@ -186,18 +195,30 @@ class CodeGraphExtractor:
             "external_packages": external_packages
         }
 
-    def _resolve_to_class(self, conn: sqlite3.Connection, node_id: str, nodes_by_id: Dict) -> Optional[str]:
+    def _resolve_to_class(
+        self,
+        conn: Optional[sqlite3.Connection],
+        node_id: str,
+        nodes_by_id: Dict,
+        contains_parent_map: Optional[Dict[str, str]] = None
+    ) -> Optional[str]:
         """If node_id is already a class/interface, return it. Otherwise find its containing class."""
         if node_id in nodes_by_id:
             return node_id
-        # Check if parent is in nodes_by_id
-        cursor = conn.cursor()
-        cursor.execute("SELECT source FROM edges WHERE target = ? AND kind = 'contains'", (node_id,))
-        row = cursor.fetchone()
-        if row:
-            parent_id = row[0]
-            if parent_id in nodes_by_id:
+        if contains_parent_map is not None:
+            parent_id = contains_parent_map.get(node_id)
+            if parent_id and parent_id in nodes_by_id:
                 return parent_id
+            return None
+        # Fallback to database query if contains_parent_map is omitted
+        if conn is not None:
+            cursor = conn.cursor()
+            cursor.execute("SELECT source FROM edges WHERE target = ? AND kind = 'contains'", (node_id,))
+            row = cursor.fetchone()
+            if row:
+                parent_id = row[0]
+                if parent_id in nodes_by_id:
+                    return parent_id
         return None
 
     def _parse_csproj_packages(self) -> Dict[str, Dict]:
@@ -217,6 +238,7 @@ class CodeGraphExtractor:
             except Exception:
                 pass
 
+        pkg_name_map = {}
         for root, dirs, files in os.walk(self.project_path):
             dirs[:] = [d for d in dirs if not d.startswith(".") and d not in ("bin", "obj", "node_modules")]
             for file in files:
@@ -237,7 +259,11 @@ class CodeGraphExtractor:
                                     version = ver_elem.text
                             if not version and name.lower() in cpm_versions:
                                 version = cpm_versions[name.lower()]
-                            name = next((pkg for pkg in packages if pkg.lower() == name.lower()), name)
+                            name_lower = name.lower()
+                            if name_lower in pkg_name_map:
+                                name = pkg_name_map[name_lower]
+                            else:
+                                pkg_name_map[name_lower] = name
                             if name not in packages:
                                 packages[name] = {
                                     "package": name,
@@ -259,7 +285,12 @@ class CodeGraphExtractor:
         imp = import_name.lower()
         return imp == pkg or imp.startswith(pkg + ".")
 
-    def _extract_nuget_dependencies(self, conn: sqlite3.Connection, nodes_by_id: Dict) -> List[Dict]:
+    def _extract_nuget_dependencies(
+        self,
+        conn: sqlite3.Connection,
+        nodes_by_id: Dict,
+        contains_parent_map: Optional[Dict[str, str]] = None
+    ) -> List[Dict]:
         """Extract external NuGet references aggregated by package name."""
         csproj_packages = self._parse_csproj_packages()
 
@@ -276,11 +307,19 @@ class CodeGraphExtractor:
             FROM unresolved_refs
             WHERE reference_kind IN ('imports', 'extends', 'implements', 'references', 'calls', 'instantiates')
         """)
+
+        # Sort packages descending by length once for fast prefix matching (longest subpackage takes precedence)
+        sorted_packages = sorted(
+            [(pkg.lower(), pkg) for pkg in csproj_packages],
+            key=lambda x: len(x[0]),
+            reverse=True
+        ) if csproj_packages else []
+
         package_map = csproj_packages.copy()
         for row in cursor.fetchall():
             imp_name = row["reference_name"] or ""
             imp_name = imp_name.removeprefix("global::")
-            if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*', imp_name):
+            if not _RE_VALID_IDENT.match(imp_name):
                 continue
             if self._is_ignored_external(imp_name):
                 continue
@@ -288,12 +327,15 @@ class CodeGraphExtractor:
             if not is_import and (not csproj_packages or "." not in imp_name):
                 continue
 
-            if csproj_packages:
-                matches = [pkg for pkg in csproj_packages if self._matches_package(pkg, imp_name)]
-                if not matches:
+            if sorted_packages:
+                imp_lower = imp_name.lower()
+                pkg_name = None
+                for pkg_low, orig_pkg in sorted_packages:
+                    if imp_lower == pkg_low or imp_lower.startswith(pkg_low + "."):
+                        pkg_name = orig_pkg
+                        break
+                if not pkg_name:
                     continue
-                # A declared subpackage takes precedence over its parent package.
-                pkg_name = max(matches, key=len)
             else:
                 # Without manifests, only imports can supply inferred package names.
                 parts = imp_name.split(".")
@@ -306,7 +348,7 @@ class CodeGraphExtractor:
 
             fpath = os.path.normpath(row["file_path"]) if row["file_path"] else ""
             class_ids = set(file_to_classes.get(fpath, [])) if is_import else set()
-            src_class_id = self._resolve_to_class(conn, row["from_node_id"], nodes_by_id)
+            src_class_id = self._resolve_to_class(conn, row["from_node_id"], nodes_by_id, contains_parent_map)
             if src_class_id:
                 class_ids.add(src_class_id)
             data = package_map[pkg_name]
